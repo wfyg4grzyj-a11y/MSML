@@ -46,7 +46,7 @@ def load_config(path: Path) -> dict:
 
 
 def export_snapshot(store: MarketStore, destination: Path, tickers: list[str],
-                    start: str | None = None, end: str | None = None) -> dict:
+                    start: str | None = None, end: str | None = None, *, routing: dict | None = None) -> dict:
     """Write a unique CSV snapshot with a content hash and provenance manifest."""
     destination = destination.resolve()
     manifest_path = destination.with_suffix(destination.suffix + ".manifest.json")
@@ -66,6 +66,7 @@ def export_snapshot(store: MarketStore, destination: Path, tickers: list[str],
         manifest = {
             "schema_version": 1, "provider": "tiingo", "frequency": "daily",
             "created_at": utc_now(), "rows": len(rows),
+            "filters": {"tickers": tickers, "start": start, "end": end},
             "tickers": sorted({row["ticker"] for row in rows}),
             "start_date": min(row["date"] for row in rows), "end_date": max(row["date"] for row in rows),
             "sha256": hashlib.sha256(temporary.read_bytes()).hexdigest(), "columns": COLUMNS,
@@ -74,6 +75,8 @@ def export_snapshot(store: MarketStore, destination: Path, tickers: list[str],
             "note": "Current back-adjusted history; fetched_at is retrieval time, not historical publication time.",
         }
         # Exclusive creation protects snapshots from accidental overwrites.
+        if routing is not None:
+            manifest["routing"] = routing
         with destination.open("xb") as output, temporary.open("rb") as source:
             shutil.copyfileobj(source, output)
         try:

@@ -28,7 +28,8 @@ dependencies = [
 alpha-lab = "alpha_lab.cli:main"
 alpha-lab-run = "alpha_lab.run:run_main"
 alpha-lab-serve = "alpha_lab.server:serve_main"
-alpha-lab-data = "alpha_lab.market_data.cli:main"
+alpha-lab-data = "alpha_lab.market_data.pipeline:main"
+alpha-lab-tiingo = "alpha_lab.market_data.cli:main"
 alpha-lab-sharadar = "alpha_lab.market_data.sharadar_cli:main"
 
 [build-system]
