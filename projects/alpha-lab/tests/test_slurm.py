@@ -61,7 +61,8 @@ class TestSbatchGeneration:
 
     def test_script_contains_run_command(self, slurm: SlurmManager, sample_experiment: Experiment) -> None:
         script = slurm.generate_sbatch_script(sample_experiment, "/workspace")
-        assert "uv run python run_experiment.py" in script
+        assert f"{slurm.python_executable} -c" in script
+        assert "runpy.run_path('run_experiment.py', run_name='__main__')" in script
         assert "cd /workspace/experiments/exp_lstm_v1" in script
 
     def test_partition_round_robin(self, slurm: SlurmManager, sample_experiment: Experiment) -> None:

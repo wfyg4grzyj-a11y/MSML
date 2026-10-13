@@ -95,7 +95,9 @@ class TestWorkerImplementStatusTransition:
 
         exp = db.get(sample_experiment.id)
         assert exp.error is not None
-        assert "run_experiment.py=False" in exp.error
+        assert "run_experiment.py" in exp.error
+        assert "strategy.py" not in exp.error
+        assert exp.status == "to_implement"
 
     def test_skips_if_already_past_to_implement(
         self, worker: Worker, db: ExperimentDB, sample_experiment: Experiment,
