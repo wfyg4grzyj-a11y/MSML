@@ -28,6 +28,7 @@ from alpha_lab.events import (
     PhaseEvent,
 )
 from alpha_lab.experiment_db import Experiment, ExperimentDB
+from alpha_lab.llm_runtime import LLMRunError, LLMRuntime
 from alpha_lab.provider import Provider
 from alpha_lab.strategist import Strategist
 from alpha_lab.worker import Worker
@@ -201,6 +202,31 @@ class Dispatcher:
             except (OSError, TypeError, ValueError) as e:
                 logger.warning("Failed to write dispatcher log entry: %s", e)
 
+    def _bounded_runtime(self) -> LLMRuntime | None:
+        runtime = getattr(self.provider, "runtime", None)
+        return runtime if isinstance(runtime, LLMRuntime) else None
+
+    def _can_start_runtime_work(self) -> bool:
+        runtime = self._bounded_runtime()
+        if runtime is not None:
+            runtime.check_deadline()
+            return runtime.stop_reason() is None
+        return True
+
+    def _runtime_work_active(self, runtime: LLMRuntime) -> bool:
+        with self._state_lock:
+            strategist_running = self._strategist_running
+        return strategist_running or any(w.busy for w in self.workers) or runtime.request_active
+
+    def _wait_for_next_poll(self) -> None:
+        for _ in range(POLL_INTERVAL):
+            if self._stop_requested:
+                break
+            runtime = self._bounded_runtime()
+            if runtime is not None:
+                runtime.check_deadline()
+            time.sleep(1)
+
     def emit(self, event: AgentEvent) -> None:
         self.event_callback(event)
         # Also log to dispatcher JSONL
@@ -366,6 +392,20 @@ class Dispatcher:
                 raise
 
             while not self._stop_requested:
+                runtime = self._bounded_runtime()
+                reason = runtime.stop_reason() if runtime is not None else None
+                if reason is not None:
+                    if reason != "deadline" and self._runtime_work_active(runtime):
+                        # Let the admitted response finish its local tools, but
+                        # admit no further agents, reports or experiment jobs.
+                        self._poll_slurm()
+                        self._emit_board_summary()
+                        self._wait_for_next_poll()
+                        continue
+                    if reason != "deadline" and self._should_terminate():
+                        break  # Last allowed response already completed the board.
+                    runtime.check_active()
+
                 # 1. Strategist turn (if due)
                 if self._should_run_strategist():
                     self._run_strategist()
@@ -404,10 +444,7 @@ class Dispatcher:
                     break
 
                 # Sleep (interruptible)
-                for _ in range(POLL_INTERVAL):
-                    if self._stop_requested:
-                        break
-                    time.sleep(1)
+                self._wait_for_next_poll()
 
             terminal_status = "stopped" if self._stop_requested else "completed"
             terminal_detail = ("Phase 3 experiment loop stopped" if self._stop_requested
@@ -477,6 +514,8 @@ class Dispatcher:
         one-shot LLM call with no feedback about what's working — testing
         the value of strategic planning vs naive proposals.
         """
+        if not self._can_start_runtime_work():
+            return
         with self._state_lock:
             self._strategist_running = True
 
@@ -608,6 +647,9 @@ Return ONLY the JSON array. No explanation."""
             messages=[{"role": "user", "content": prompt}],
             max_tokens=8000,
         )
+        runtime = self._bounded_runtime()
+        if runtime is not None:
+            runtime.check_deadline()
 
         # Parse response
         text = response.strip()
@@ -625,6 +667,8 @@ Return ONLY the JSON array. No explanation."""
             proposals = [proposals]
 
         for p in proposals[:batch_size]:
+            if runtime is not None:
+                runtime.check_deadline()
             name = _re.sub(r"[^a-zA-Z0-9_\-]", "_", str(p.get("name", "random")))[:80]
             desc = str(p.get("description", ""))
             hyp = str(p.get("hypothesis", ""))
@@ -746,6 +790,8 @@ Return ONLY the JSON array. No explanation."""
         for exp in checked:
             if self._stop_requested:
                 break
+            if not self._can_start_runtime_work():
+                break
 
             # Determine which executor to use
             # CPU-only mode: route everything to CPU when no GPU executor
@@ -772,17 +818,25 @@ Return ONLY the JSON array. No explanation."""
 
             if self._stop_requested:
                 break
+            if not self._can_start_runtime_work():
+                break
             reservation = self.db.reserve_submission(exp)
             if reservation is None:
                 continue  # Snapshot was pruned, changed, or claimed after listing.
             job_id = None
             try:
+                if not self._can_start_runtime_work():
+                    self.db.flag_submission(reservation, "Run limit reached before submission; reconcile before retry.")
+                    break
                 job_id = executor.submit_experiment(reservation, self.workspace)
                 self._log("submission_returned", experiment_id=exp.id, job_id=job_id)
                 if not self.db.attach_submission(reservation, job_id):
                     raise RuntimeError("Submission reservation changed before job attachment")
                 if use_cpu:
                     self._cpu_job_ids.add(job_id)
+            except LLMRunError:
+                self.db.flag_submission(reservation, "Run limit interrupted submission; reconcile before retry.")
+                raise
             except Exception as e:
                 logger.error("Submit failed for experiment #%s (%s)", exp.id, type(e).__name__)
                 if job_id:
@@ -810,6 +864,8 @@ Return ONLY the JSON array. No explanation."""
 
         if self._stop_requested:
             return
+        if not self._can_start_runtime_work():
+            return
 
         idle = [w for w in self.workers if not w.busy]
         if not idle:
@@ -828,6 +884,8 @@ Return ONLY the JSON array. No explanation."""
 
         for exp in fixable:
             if not idle or self._stop_requested:
+                break
+            if not self._can_start_runtime_work():
                 break
             worker = idle[0]
             if worker.fix(exp) is False:
@@ -851,6 +909,8 @@ Return ONLY the JSON array. No explanation."""
         for exp in unassigned_finished:
             if not idle or self._stop_requested:
                 break
+            if not self._can_start_runtime_work():
+                break
             worker = idle[0]
             if worker.analyze(exp) is False:
                 continue
@@ -869,6 +929,8 @@ Return ONLY the JSON array. No explanation."""
 
         for exp in unassigned_impl:
             if not idle or self._stop_requested:
+                break
+            if not self._can_start_runtime_work():
                 break
             worker = idle[0]
             if worker.implement(exp) is False:
@@ -964,6 +1026,8 @@ Return ONLY the JSON array. No explanation."""
 
         if error_rate <= 0.4:
             return
+        if not self._can_start_runtime_work():
+            return
 
         logger.warning(
             f"Error rate {error_rate:.0%} exceeds 40% — running supervisor health check"
@@ -1055,6 +1119,8 @@ Return ONLY the JSON array. No explanation."""
             idle = [w for w in self.workers if not w.busy]
             if not idle:
                 return  # all busy, try next cycle
+            if not self._can_start_runtime_work():
+                return
 
             self._report_number += 1
             worker = idle[0]
@@ -1071,6 +1137,9 @@ Return ONLY the JSON array. No explanation."""
             # Ensure reports directory exists
             Path(self.workspace, "reports").mkdir(parents=True, exist_ok=True)
 
+            if not self._can_start_runtime_work():
+                self._report_number -= 1
+                return
             if worker.generate_report(self._report_number, done_count) is False:
                 self._report_number -= 1
                 return

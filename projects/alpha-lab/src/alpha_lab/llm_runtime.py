@@ -73,6 +73,11 @@ class LLMRuntime:
         self.output_tokens = 0
         self.records = []
         self._lock = threading.Lock()
+        # Request serialization spans network I/O; lifecycle inspection must not.
+        self._state_lock = threading.Lock()
+        self._ledger_lock = threading.Lock()
+        self._request_active = False
+        self._terminal_reason = None
 
     def remaining_seconds(self):
         remaining = self.settings.max_run_seconds - (time.monotonic()-self.started)
@@ -83,65 +88,120 @@ class LLMRuntime:
     def request_timeout_seconds(self):
         return max(0.,min(self.settings.max_request_seconds,self.remaining_seconds()))
 
+    @property
+    def request_active(self) -> bool:
+        with self._state_lock:
+            return self._request_active
+
+    def stop_reason(self) -> str | None:
+        """Inspect global limits without waiting for a running SDK request."""
+        if self.remaining_seconds() <= 0:
+            return "deadline"
+        with self._state_lock:
+            if self._terminal_reason is not None:
+                return self._terminal_reason
+            if self.calls >= self.settings.max_calls:
+                return "call_budget"
+            used = max(self.reserved_tokens, self.input_tokens + self.output_tokens)
+            # Even a one-token request needs this fixed reservation allowance.
+            minimum = 8192 + 1 + len(json.dumps(["", [], []]).encode("utf-8"))
+            if used + minimum > self.settings.max_reserved_tokens:
+                return "token_budget"
+        return None
+
+    def check_deadline(self) -> None:
+        """Already admitted tool results may finish only before the time cutoff."""
+        if self.remaining_seconds() <= 0:
+            raise LLMRunError("LLM run deadline reached")
+
+    def check_active(self) -> None:
+        reason = self.stop_reason()
+        if reason == "deadline":
+            raise LLMRunError("LLM run deadline reached")
+        if reason is not None:
+            raise LLMRunError("LLM call or reserved-token budget reached")
+
     def save(self):
         if self.ledger:
-            self.ledger.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"settings": asdict(self.settings), "calls": self.calls,
-                       "reserved_tokens": self.reserved_tokens,
-                       "reported_input_tokens": self.input_tokens,
-                       "reported_output_tokens": self.output_tokens,
-                       "records": self.records}
-            temporary = self.ledger.with_suffix(".tmp")
-            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            temporary.replace(self.ledger)
+            with self._ledger_lock:
+                with self._state_lock:
+                    payload = {"settings": asdict(self.settings), "calls": self.calls,
+                               "reserved_tokens": self.reserved_tokens,
+                               "reported_input_tokens": self.input_tokens,
+                               "reported_output_tokens": self.output_tokens,
+                               "request_active": self._request_active,
+                               "terminal_reason": self._terminal_reason,
+                               "records": self.records}
+                    serialized = json.dumps(payload, indent=2)
+                self.ledger.parent.mkdir(parents=True, exist_ok=True)
+                temporary = self.ledger.with_suffix(".tmp")
+                temporary.write_text(serialized, encoding="utf-8")
+                temporary.replace(self.ledger)
 
     @contextmanager
     def request(self, system, history, tools, output_cap=None):
         with self._lock:
             s = self.settings
+            if output_cap is not None and (isinstance(output_cap, bool)
+                                          or not isinstance(output_cap, int) or output_cap <= 0):
+                raise LLMRunError("Output token cap must be a positive integer")
             size = len(json.dumps([system, history, tools], ensure_ascii=False).encode("utf-8"))
             cap = min(output_cap or s.max_output_tokens, s.max_output_tokens)
             reserve = size + 8192 + cap
             if size > s.max_context_bytes:
                 raise LLMRunError("Explicit context byte limit reached; no automatic truncation")
-            if self.remaining_seconds() <= 0:
-                raise LLMRunError("LLM run deadline reached")
-            used=max(self.reserved_tokens,self.input_tokens+self.output_tokens)
-            if self.calls >= s.max_calls or used + reserve > s.max_reserved_tokens:
+            self.check_deadline()
+            with self._state_lock:
+                used = max(self.reserved_tokens, self.input_tokens + self.output_tokens)
+                if self._terminal_reason is None:
+                    if self.calls >= s.max_calls:
+                        self._terminal_reason = "call_budget"
+                    elif used + reserve > s.max_reserved_tokens:
+                        self._terminal_reason = "token_budget"
+                reason = self._terminal_reason
+                if reason is None:
+                    self.calls += 1
+                    self.reserved_tokens += reserve
+                    record = {"call": self.calls, "reserved_tokens": reserve, "status": "started",
+                              "remaining_run_seconds":round(self.remaining_seconds(),3)}
+                    self.records.append(record)
+                    self._request_active = True
+            if reason is not None:
+                self.save()
                 raise LLMRunError("LLM call or reserved-token budget reached")
-            self.calls += 1
-            self.reserved_tokens += reserve
-            record = {"call": self.calls, "reserved_tokens": reserve, "status": "started",
-                      "remaining_run_seconds":round(self.remaining_seconds(),3)}
-            self.records.append(record)
-            self.save()
             request_start = time.monotonic()
             try:
+                self.save()
                 yield record
             except LLMRunError:
-                record["status"] = "failed"
+                with self._state_lock:
+                    record["status"] = "failed"
                 raise
             except Exception as error:
-                record["status"] = "failed"
+                with self._state_lock:
+                    record["status"] = "failed"
                 status = getattr(error, "status_code", None)
                 # Never serialize arbitrary gateway error strings or request bodies.
                 raise LLMRunError(f"LLM request failed: {type(error).__name__}, HTTP {status}") from None
             finally:
-                record["elapsed_seconds"] = round(time.monotonic() - request_start, 3)
+                with self._state_lock:
+                    record["elapsed_seconds"] = round(time.monotonic() - request_start, 3)
+                    self._request_active = False
                 self.save()
 
     def record_usage(self, record, response):
-        usage = getattr(response, "usage", None)
-        if usage:
-            record["input_tokens"] = int(usage.input_tokens)
-            record["output_tokens"] = int(usage.output_tokens)
-            self.input_tokens += record["input_tokens"]
-            self.output_tokens += record["output_tokens"]
-            details=getattr(usage,"output_tokens_details",None)
-            reasoning=getattr(details,"reasoning_tokens",None)
-            if reasoning is not None:
-                record["reasoning_tokens"]=int(reasoning)
-        record["status"] = "completed"
+        with self._state_lock:
+            usage = getattr(response, "usage", None)
+            if usage:
+                record["input_tokens"] = int(usage.input_tokens)
+                record["output_tokens"] = int(usage.output_tokens)
+                self.input_tokens += record["input_tokens"]
+                self.output_tokens += record["output_tokens"]
+                details=getattr(usage,"output_tokens_details",None)
+                reasoning=getattr(details,"reasoning_tokens",None)
+                if reasoning is not None:
+                    record["reasoning_tokens"]=int(reasoning)
+            record["status"] = "completed"
 
 
 def bounded_provider(settings: LLMSettings, ledger: Path):

@@ -294,6 +294,25 @@ These guards check local workflow completion, not the validity of a strategy or
 the provenance of old resume files. Background proposer/worker errors retain
 their existing bounded retry/diagnostic behavior; they are not all fatal errors.
 
+When llm_runtime is enabled, shared deadline/call/token limits also constrain
+dispatcher orchestration. Lifecycle checks use a short state lock separate from
+the request serialization lock, so a stalled network call cannot hold up a time
+cutoff check. No new agents, milestone reports or native experiment submissions
+are admitted after a global limit is observed. At a call/token limit, the runner
+drains already admitted responses and their tools, polling existing jobs without
+starting more work. If that last response completes the board, the run can finish
+normally; otherwise the partial run fails and executors are cleaned up. A time
+cutoff interrupts this drain. A rejected token reservation ends that runtime;
+it cannot silently reset or choose a smaller request to keep the same run alive.
+Each response tool is checked before execution and again before accepting its
+completion. A tool result arriving after the time cutoff remains logged but
+cannot promote the agent to success. Limits check admission; arbitrary shell
+tools already executing may outlive their admission check until their own
+timeout/cancellation completes. Upstream gateway billing termination is not
+attested. These controls apply to the active runtime, not a durable cross-process
+budget ledger: restart accounting still needs explicit review and a fresh run
+manifest. Generic runs without llm_runtime retain their existing behavior.
+
 Material research limitations: corrected vendor history is not a historical
 feed replay; the static security classification and ticker/issuer mappings are
 not fully point-in-time audited; terminal actions are not reconciled into all

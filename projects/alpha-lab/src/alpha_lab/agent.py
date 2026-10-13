@@ -460,6 +460,9 @@ class AgentLoop:
         for tc in tool_calls:
             if self._stop_requested:
                 break
+            runtime = getattr(self.provider, "runtime", None)
+            if isinstance(runtime, LLMRuntime):
+                runtime.check_deadline()
 
             name = tc.name
             call_id = tc.call_id
@@ -511,6 +514,8 @@ class AgentLoop:
             ))
 
             # Handle spawn_sub_agent within AgentLoop (needs self.provider, etc.)
+            if isinstance(runtime, LLMRuntime):
+                runtime.check_deadline()
             allowed_names = {tool.get("name") for tool in self.tools}
             if name not in allowed_names:
                 result = {"output": f"[TOOL ERROR] Tool {name} is not enabled for this run"}
@@ -560,6 +565,8 @@ class AgentLoop:
                 image_base64=image_b64,
                 media_type=image_media,
             ))
+            if isinstance(runtime, LLMRuntime):
+                runtime.check_deadline()
 
             # Check if agent is done — require confirmation on first attempt
             if result.get("done"):
