@@ -143,6 +143,65 @@ Generated code must also use portable Python paths and process APIs. CUDA kernel
 compilation and Linux-only libraries may require additional domain-specific work;
 the local runner support does not make every research domain Windows-compatible.
 
+### Default market data: Sharadar first
+
+`alpha-lab-data` (or `python -m alpha_lab.market_data.pipeline`) now uses
+Sharadar as the primary source. All 14 bulk tables remain available, including
+fundamentals, daily market-cap metrics, stock/fund prices, corporate actions,
+S&P 500 membership, insiders and institutional holdings. The `daily_prices`
+dataset chooses `stocks` or `funds` for each requested ticker.
+
+The default command looks for ignored `data/market/pipeline.json`, then falls
+back to `data/market.example.json`. The pipeline configuration references
+existing provider configuration files; paths resolve relative to that file.
+Keep both API keys in `.env`.
+
+```json
+{
+  "sharadar_config": "sharadar.json",
+  "tiingo_config": "tiingo.json",
+  "tickers": ["SPY"]
+}
+```
+
+```powershell
+# Update the configured Sharadar tables; check configured tickers for gaps.
+alpha-lab-data sync
+alpha-lab-data status
+alpha-lab-data route --ticker SPY
+alpha-lab-data export --ticker SPY --output data/market/snapshots/spy-primary-v1.csv
+# Explicit earlier-history request routes SPY's complete series to Tiingo.
+alpha-lab-data sync --dataset daily_prices --ticker SPY --start-date 1993-01-29
+alpha-lab-data export --ticker SPY --start-date 1993-01-29 --output data/market/snapshots/spy-long-v1.csv
+# Other datasets always use their Sharadar table, preserving native fields.
+alpha-lab-data export --dataset fundamentals --ticker AAPL --dimension ARQ --output data/market/snapshots/aapl-arq-v1.csv
+alpha-lab-data catalog
+```
+
+With no requested start date, prices use Sharadar's available full history.
+Tiingo EOD is used only when the ticker is absent from Sharadar's downloaded
+stock/fund tables or the request starts before its Sharadar history. Tiingo
+coverage is checked during sync; fallback is not a promise that Tiingo has
+the missing data. Missing/corrupt local snapshots and authentication, network,
+rate-limit or validation failures are errors and never trigger fallback.
+Updates sync primary tables before checking gaps, so stale primary data is
+refreshed through Sharadar. A requested end date beyond Sharadar's last bar
+does not imply a missing dataset. Direct bulk table syncs always fetch the
+full table; ticker/date options control routing and offline exports.
+
+Daily-price exports accept one ticker at a time. Each export retains one
+provider's native schema and a manifest with the source, routing reason,
+adjustment conventions and content hash. No adjusted price series are
+spliced across providers. `--asset-table stocks|funds` resolves a ticker
+present in both Sharadar tables. `route`, `status` and `export` are offline;
+sync a fallback request before exporting it. CSV snapshots are immutable.
+
+The existing Tiingo adapter covers daily prices. News, intraday/overnight
+prices, fund fees and detailed dividends are listed as Tiingo-only datasets
+in `catalog`, with `not_implemented` status; requesting them gives an explicit
+error. Their adapters and account entitlements must be added before ingestion.
+No LLM campaign or recurring schedule is started by these commands.
+
 ### Tiingo daily market data
 
 The market data CLI runs independently of the research agents and makes no
@@ -167,7 +226,7 @@ python -m alpha_lab.market_data.cli --config data/tiingo.example.json status
 python -m alpha_lab.market_data.cli --config data/tiingo.example.json export --output data/market/snapshots/daily-v1.csv
 ```
 
-After reinstalling the editable package, `alpha-lab-data` is an equivalent
+After reinstalling the editable package, `alpha-lab-tiingo` is an equivalent
 entry point. `sync --env-file <path>` loads another local secret file.
 Standard `HTTPS_PROXY` environment settings are respected.
 

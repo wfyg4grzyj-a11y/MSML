@@ -210,7 +210,7 @@ class SharadarStore:
                     raise SharadarError("Refusing to remove an unexpected staging directory")
                 shutil.rmtree(resolved_stage)
 
-    def export(self, table, destination, *, tickers=None, start=None, end=None, dimension=None, columns=None):
+    def export(self, table, destination, *, tickers=None, start=None, end=None, dimension=None, columns=None, routing=None):
         """Offline filtered CSV with provenance; never overwrite an existing export."""
         table = table_name(table)
         snapshot = self.latest(table)
@@ -262,6 +262,11 @@ class SharadarStore:
             manifest = {"provider": "sharadar.com", "table": table, "source_version": snapshot["version"],
                         "source": snapshot["source"], "created_at": utc_now(), "sha256": file_hash(destination),
                         "filters": {"tickers": tickers, "start": start, "end": end, "dimension": dimension}, "columns": selected}
+            if routing is not None:
+                manifest["routing"] = routing
+            if table in {"stocks", "funds"}:
+                manifest["adjustments"] = "OHLC and volume split-adjusted; closeadj also adjusts dividends/spinoffs; closeunadj is raw close"
+                manifest["point_in_time"] = False
             with sidecar.open("x", encoding="utf-8") as output:
                 manifest_created = True
                 json.dump(manifest, output, indent=2)
