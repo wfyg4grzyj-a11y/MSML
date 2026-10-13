@@ -212,6 +212,87 @@ Provider references: [EOD fields](https://www.tiingo.com/documentation/end-of-da
 and [adjustment refresh guidance](https://www.tiingo.com/kb/article/the-fastest-method-to-ingest-tiingo-end-of-day-stock-api-data/).
 Tests run without network access: `python -m pytest tests/test_market_data.py`.
 
+### Direct Sharadar full-history bundle
+
+The direct `sharadar.com` connector uses `SHARADAR_API_KEY` in your ignored
+`.env`, independently of Tiingo and LLM credentials. It supports all 14 bundle
+tables: descriptions, tickers, S&P 500 membership, actions, events, metrics,
+fundamentals, daily metrics, stock/fund prices, insider transactions, and the
+three institutional holdings tables. This is the direct API, with canonical
+table names such as `stocks` and `fundamentals`; legacy aliases `SEP`, `SF1`,
+`SFP`, `SF2`, `SF3`, `SF3A`, and `SF3B` also work in `--table`.
+
+Install the updated requirements (including DuckDB) in your environment.
+Copy `data/sharadar.example.json` to `data/market/sharadar.json` and set its
+`root` to `sharadar`. Paths resolve relative to the config file. The example
+requests the full history of every table, including delisted securities.
+
+```powershell
+python -m alpha_lab.market_data.sharadar_cli --config data/market/sharadar.json probe
+python -m alpha_lab.market_data.sharadar_cli --config data/market/sharadar.json sync
+python -m alpha_lab.market_data.sharadar_cli --config data/market/sharadar.json status
+python -m alpha_lab.market_data.sharadar_cli --config data/market/sharadar.json export --table funds --ticker SPY --output data/market/snapshots/sharadar-spy-v1.csv
+python -m alpha_lab.market_data.sharadar_cli --config data/market/sharadar.json export --table fundamentals --ticker AAPL --dimension ARQ --output data/market/snapshots/aapl-arq-v1.csv
+```
+
+The installed entry point is `alpha-lab-sharadar`. Use `sync --table stocks`
+to update one table, or `sync --force` to rebuild snapshots even if source
+metadata is unchanged. Export accepts repeated `--ticker`, `--start-date`,
+`--end-date`, and comma-separated `--columns`. Status and export work offline.
+No research campaign or LLM is started by any of these commands.
+
+Sync downloads provider ZIPs with byte-range resumption, reissues expiring
+signed links, verifies ZIP CRCs, casts against the public schema and checks
+primary-key uniqueness. It publishes a table's new Parquet version only after
+validation succeeds. Failed tables keep their previous snapshot; rerunning
+sync resumes downloads and skips unchanged completed tables. An OS file lock
+rejects concurrent writers to the same storage root. Daily updates download
+a new full file when the source changes; this initial connector does not merge
+incremental query results. Budget disk for ZIP archives, staged CSVs and retained
+Parquet versions. The default DuckDB memory limit is 4GB with four threads;
+large validations may spill into the local temporary directory.
+
+Original columns and schema types are retained. Each snapshot records source
+modification time, row/date coverage, schemas, and archive/Parquet SHA-256 hashes.
+Exports include a source-version manifest and refuse to overwrite files.
+Research code can query a pinned Parquet snapshot without loading the universe:
+
+```python
+import duckdb
+from alpha_lab.market_data.sharadar_store import SharadarStore
+
+store = SharadarStore("data/market/sharadar")
+snapshot = store.latest("funds")
+with duckdb.connect() as db:
+    spy = db.execute(
+        "SELECT date, closeadj, volume FROM read_parquet(?) WHERE ticker = ? ORDER BY date",
+        [snapshot["path"], "SPY"],
+    ).df()
+```
+
+Sharadar stock/fund OHLC and volume are split-adjusted; `closeadj` also adjusts
+for dividends and spinoffs, while `closeunadj` is the raw close. They retain
+their provider names instead of being relabeled as Tiingo raw bars. `daily`
+market cap is reported in **USD millions**, whereas `fundamentals` market cap
+uses USD. Consult the `descriptions` table for each field's units. Field
+descriptions and ticker metadata retain legacy table labels such as `SF1`, `SEP`, `SFP`,
+and `DAILY`; use those labels when joining the metadata to canonical API tables.
+Fundamentals ARQ/ARY/ART are as reported; MRQ/MRY/MRT are restated. Preserve dimensions and
+report dates, and explicitly establish availability dates before backtesting.
+S&P 500 data provides membership events/snapshots, without official weights.
+Institutional holdings are quarterly 13F data, rather than daily ETF holdings.
+Bulk files are the provider's current history, not an archive of what was
+available on every historical day. Keep pinned versions for reproducibility.
+
+Provider documentation: [bundle](https://sharadar.com/bundle),
+[authentication](https://sharadar.com/docs/auth),
+[stock prices](https://sharadar.com/docs/stocks),
+[daily metrics](https://sharadar.com/docs/daily),
+[fundamentals](https://sharadar.com/docs/fundamentals),
+[S&P 500 membership](https://sharadar.com/docs/sp500), and
+[institutional holdings](https://sharadar.com/docs/holdings).
+Offline tests: `python -m pytest tests/test_sharadar_market_data.py`.
+
 ### 2. Configure API keys
 
 ```bash
