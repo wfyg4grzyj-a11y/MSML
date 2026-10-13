@@ -155,12 +155,34 @@ def run_main() -> None:
     workspace = os.path.abspath(args.workspace)
     Path(workspace).mkdir(parents=True, exist_ok=True)
 
+    from alpha_lab.workspace_lock import WorkspaceLock
+    with WorkspaceLock(workspace) as workspace_lock:
+        _run_configured(args, config, workspace, workspace_lock)
+
+
+def _run_configured(args, config, workspace, workspace_lock) -> None:
+    """Own resource cleanup even when provider or Phase 0 initialization fails."""
+    from contextlib import ExitStack
+    with ExitStack() as resources:
+        _run_configured_body(args, config, workspace, workspace_lock, resources)
+
+
+def _close_event_log() -> None:
+    global _event_log_file
+    if _event_log_file is not None:
+        _event_log_file.close()
+        _event_log_file = None
+
+
+def _run_configured_body(args, config, workspace, workspace_lock, resources) -> None:
+
     # Open structured JSONL event log in workspace parent (survives workspace rm -rf)
     global _event_log_file, _run_tag
     from datetime import datetime, timezone
     event_log_dir = Path(workspace).parent
     event_log_dir.mkdir(parents=True, exist_ok=True)
     _event_log_file = open(event_log_dir / "events.jsonl", "a")
+    resources.callback(_close_event_log)
     _run_tag = Path(workspace).name
     # Write run-start marker
     _event_log_file.write(json.dumps({
@@ -191,6 +213,11 @@ def run_main() -> None:
     provider = get_provider(provider_name, api_key=api_key,
                             runtime_settings=config.llm_runtime,
                             ledger=Path(workspace) / "llm-usage.json")
+    close_provider = getattr(provider, "close", None)
+    if callable(close_provider):
+        resources.callback(close_provider)
+    elif getattr(provider, "openai_client", None) is not None:
+        resources.callback(provider.openai_client.close)
 
     # Phase 0: resolve or generate domain adapter
     from alpha_lab.phase0 import run_phase0
@@ -362,6 +389,7 @@ def run_main() -> None:
                 cpu_executor=cpu_executor,
                 adapter=adapter,
                 supervisor=supervisor,
+                workspace_lock=workspace_lock,
             )
             dispatcher.run()
 
@@ -384,11 +412,6 @@ def run_main() -> None:
                 cpu_executor.cleanup_all()
             except Exception as e:
                 logger.warning("Failed to cleanup CPU executor: %s", e)
-        if hasattr(provider, 'openai_client'):
-            try:
-                provider.openai_client.close()
-            except Exception as e:
-                logger.warning("Failed to close OpenAI client: %s", e)
         if _event_log_file is not None:
             try:
                 _event_log_file.close()

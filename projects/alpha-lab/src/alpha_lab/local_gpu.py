@@ -8,7 +8,6 @@ to a specific GPU.
 from __future__ import annotations
 
 import logging
-import json
 import os
 import subprocess
 import sys
@@ -22,6 +21,10 @@ import psutil
 
 from alpha_lab.experiment_db import Experiment
 from alpha_lab.local_process import ManagedProcess, RecoveredProcess, start_process
+from alpha_lab.local_job_state import (
+    job_directory, load_record, inspect_process, receipt_path, metadata_path,
+    record_terminal, terminal_status, write_atomic, effective_time_limit,
+)
 
 logger = logging.getLogger("alpha_lab.local_gpu")
 
@@ -36,6 +39,7 @@ class LocalJob:
     workspace: str
     start_time: float = 0.0  # time.time() when started
     terminal_status: str | None = None
+    time_limit: float = 0
 
 
 class LocalGPUManager:
@@ -76,139 +80,53 @@ class LocalGPUManager:
         self.time_limit = time_limit_seconds
         self.python_executable = python_executable or sys.executable
         self._jobs: dict[str, LocalJob] = {}
+        self._terminal_jobs: dict[str, str] = {}
         self._workspace: str | None = None  # Set on first submit
 
     def recover_running_jobs(self, workspace: str, job_id_map: dict[str, str]) -> int:
-        """Discover already-running GPU processes and resume tracking them.
-
-        Called on startup to reconcile database state with actual running processes.
-
-        Parameters
-        ----------
-        workspace : str
-            Workspace path to match against process working directories
-        job_id_map : dict[str, str]
-            Map of {job_id: experiment_name} from database for validation
-
-        Returns
-        -------
-        int
-            Number of jobs recovered
-        """
+        """Adopt verified native GPU identities or replay scoped terminal evidence."""
         workspace = str(Path(workspace).resolve())
         self._workspace = workspace
         recovered = 0
         runner = str(Path(__file__).with_name("local_runner.py"))
-        for job_id, exp_name in job_id_map.items():
-            exp_dir = (Path(workspace) / "experiments" / exp_name).resolve()
+        for job_id, name in job_id_map.items():
+            if job_id in self._jobs or job_id in self._terminal_jobs:
+                continue
             try:
-                exp_dir.relative_to(Path(workspace) / "experiments")
-                record = json.loads((exp_dir / "local_job.json").read_text(encoding="utf-8"))
-                if record["job_id"] != job_id or record["gpu_id"] not in self.gpu_ids:
+                directory = job_directory(workspace, name)
+                record = load_record(directory, workspace, name, "gpu", job_id)
+                if record is None or type(record.get("gpu_id")) is not int or record["gpu_id"] not in self.gpu_ids:
+                    continue
+                process, live = inspect_process(record, directory, runner)
+                if process is None:
+                    status = terminal_status(record, directory) if not live else None
+                    if status is not None:
+                        self._terminal_jobs[job_id] = status
+                        recovered += 1
                     continue
                 if os.name == "nt" and not record.get("job_name"):
                     continue
-                process = psutil.Process(record["pid"])
-                if process.create_time() != record["created"] or Path(process.cwd()).resolve() != exp_dir:
-                    continue
-                if runner not in process.cmdline():
-                    continue
                 proc = RecoveredProcess(record["pid"], created=record["created"],
                                         job_name=record.get("job_name"),
-                                        exit_file=exp_dir / "local_exit_code.txt")
+                                        exit_file=receipt_path(directory, job_id),
+                                        exit_identity=(job_id, "gpu"))
                 self._jobs[job_id] = LocalJob(
-                    proc=proc, gpu_id=record["gpu_id"], exp_name=exp_name,
-                    output_file=open(exp_dir / "local_job.out", "a", encoding="utf-8"),
-                    workspace=workspace, start_time=record["start_time"],
+                    proc=proc, gpu_id=record["gpu_id"], exp_name=name, workspace=workspace,
+                    start_time=record["start_time"],
+                    time_limit=record["time_limit_seconds"],
+                    output_file=open(directory / "local_job.out", "a", encoding="utf-8"),
                 )
                 recovered += 1
             except (OSError, ValueError, KeyError, psutil.Error):
                 continue
-        if os.name == "nt":
-            return recovered
-
-        try:
-            result = subprocess.run(
-                ["ps", "aux"],
-                capture_output=True, text=True, timeout=5,
-            )
-
-            for line in result.stdout.split('\n'):
-                if 'run_local.sh' not in line or 'bash' not in line or 'grep' in line:
-                    continue
-
-                parts = line.split()
-                if len(parts) < 2:
-                    continue
-
-                pid = int(parts[1])
-
-                try:
-                    cwd_result = subprocess.run(
-                        ["readlink", f"/proc/{pid}/cwd"],
-                        capture_output=True, text=True, timeout=1,
-                    )
-                    cwd = cwd_result.stdout.strip()
-                except Exception:
-                    continue
-
-                if '/experiments/' not in cwd:
-                    continue
-
-                exp_name = Path(cwd).name
-
-                job_id = None
-                for jid, ename in job_id_map.items():
-                    if ename == exp_name:
-                        job_id = jid
-                        break
-
-                if not job_id or job_id in self._jobs:
-                    continue
-
-                gpu_id = -1
-                try:
-                    env_result = subprocess.run(
-                        ["cat", f"/proc/{pid}/environ"],
-                        capture_output=True, text=True, timeout=1,
-                    )
-                    for env_var in env_result.stdout.split('\x00'):
-                        if env_var.startswith('CUDA_VISIBLE_DEVICES='):
-                            gpu_str = env_var.split('=', 1)[1]
-                            if gpu_str:
-                                gpu_id = int(gpu_str.split(',')[0])
-                            break
-                except Exception:
-                    pass
-
-                if gpu_id < 0 or gpu_id not in self.gpu_ids:
-                    logger.warning(f"Could not determine GPU for process {pid} ({exp_name}), skipping")
-                    continue
-
-                try:
-                    proc = RecoveredProcess(pid)
-                    output_path = Path(cwd) / "local_job.out"
-                    try:
-                        output_file = open(output_path, "a")
-                    except Exception:
-                        output_file = open(os.devnull, "w")
-
-                    job = LocalJob(
-                        proc=proc, gpu_id=gpu_id, exp_name=exp_name,
-                        output_file=output_file, workspace=workspace,
-                        start_time=0.0,  # Unknown — won't enforce timeout for recovered jobs
-                    )
-                    self._jobs[job_id] = job
-                    recovered += 1
-                    logger.info(f"Recovered job {job_id} ({exp_name}) on GPU {gpu_id}, PID {pid}")
-
-                except Exception as e:
-                    logger.warning(f"Failed to recover job for {exp_name}: {e}")
-
-        except Exception as e:
-            logger.error(f"Job recovery failed: {e}")
-
         return recovered
+
+    def _record_terminal(self, job_id: str, status: str, code: int | None = None) -> None:
+        job = self._jobs[job_id]
+        try:
+            record_terminal(job.workspace, job.exp_name, "gpu", job_id, status, code)
+        except OSError:
+            logger.warning("Could not persist terminal GPU identity for %s", job_id)
 
     def _gpu_load(self) -> dict[int, int]:
         """Return {gpu_id: num_running_jobs}."""
@@ -379,9 +297,9 @@ class LocalGPUManager:
                 "Job will wait until memory frees up."
             )
 
-        exp_dir = Path(workspace) / "experiments" / exp.name
-        exp_dir.resolve().relative_to(Path(workspace) / "experiments")
+        exp_dir = job_directory(workspace, exp.name)
         exp_dir.mkdir(parents=True, exist_ok=True)
+        job_id = uuid.uuid4().hex
         (exp_dir / "local_exit_code.txt").unlink(missing_ok=True)
 
         env = os.environ.copy()
@@ -389,6 +307,7 @@ class LocalGPUManager:
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         env["PYTHONIOENCODING"] = "utf-8"
+        env["ALPHALAB_JOB_ID"] = job_id
         runner = str(Path(__file__).with_name("local_runner.py"))
         output_path = exp_dir / "local_job.out"
         output_file = open(output_path, "w", encoding="utf-8")
@@ -402,7 +321,6 @@ class LocalGPUManager:
             output_file.close()
             raise
 
-        job_id = str(uuid.uuid4())[:8]
         self._jobs[job_id] = LocalJob(
             proc=proc,
             gpu_id=gpu_id,
@@ -410,15 +328,18 @@ class LocalGPUManager:
             output_file=output_file,
             workspace=workspace,
             start_time=time.time(),
+            time_limit=max(0, self.time_limit),
         )
 
         try:
             record = {
+                "schema_version": 1, "resource": "gpu", "workspace": workspace, "experiment_name": exp.name,
                 "job_id": job_id, "pid": proc.pid, "created": proc.created,
                 "gpu_id": gpu_id, "start_time": self._jobs[job_id].start_time,
+                "time_limit_seconds": self._jobs[job_id].time_limit,
                 "job_name": proc.job.name if proc.job else None,
             }
-            (exp_dir / "local_job.json").write_text(json.dumps(record), encoding="utf-8")
+            write_atomic(metadata_path(exp_dir, "gpu"), record)
         except BaseException:
             self.cancel(job_id)
             raise
@@ -436,6 +357,9 @@ class LocalGPUManager:
         now = time.time()
 
         for job_id in job_ids:
+            if job_id in self._terminal_jobs:
+                result[job_id] = self._terminal_jobs[job_id]
+                continue
             if job_id not in self._jobs:
                 result[job_id] = "UNKNOWN"
                 continue
@@ -449,22 +373,30 @@ class LocalGPUManager:
             if retcode is None:
                 # Still running - check for timeout
                 elapsed = now - job.start_time
-                if self.time_limit > 0 and job.start_time > 0 and elapsed > self.time_limit:
+                limit = effective_time_limit(job.time_limit, self.time_limit)
+                if limit > 0 and job.start_time > 0 and elapsed > limit:
                     logger.warning(
                         f"Job {job_id} ({job.exp_name}) exceeded time limit "
-                        f"({elapsed:.0f}s > {self.time_limit}s), killing"
+                        f"({elapsed:.0f}s > {limit}s), killing"
                     )
                     self._kill_job(job_id)
                     job.terminal_status = "TIMEOUT"
+                    self._record_terminal(job_id, "TIMEOUT")
                     result[job_id] = "TIMEOUT"
                 else:
                     result[job_id] = "RUNNING"
+            elif getattr(job.proc, "unverified_exit", False):
+                job.terminal_status = "UNKNOWN"
+                result[job_id] = "UNKNOWN"
+                self._cleanup_job(job_id)
             elif retcode == 0:
                 job.terminal_status = "COMPLETED"
+                self._record_terminal(job_id, "COMPLETED", retcode)
                 result[job_id] = "COMPLETED"
                 self._cleanup_job(job_id)
             else:
                 job.terminal_status = "FAILED"
+                self._record_terminal(job_id, "FAILED", retcode)
                 result[job_id] = "FAILED"
                 logger.warning(f"Job {job_id} ({job.exp_name}) failed with exit code {retcode}")
                 self._cleanup_job(job_id)
@@ -490,6 +422,7 @@ class LocalGPUManager:
         logger.info(f"Cancelling job {job_id} ({job.exp_name})")
         self._kill_job(job_id)
         job.terminal_status = "CANCELLED"
+        self._record_terminal(job_id, "CANCELLED")
 
     def _cleanup_job(self, job_id: str) -> None:
         """Close output file and remove from tracking."""

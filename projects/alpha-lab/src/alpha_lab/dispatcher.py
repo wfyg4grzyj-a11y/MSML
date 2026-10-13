@@ -31,6 +31,7 @@ from alpha_lab.experiment_db import Experiment, ExperimentDB
 from alpha_lab.provider import Provider
 from alpha_lab.strategist import Strategist
 from alpha_lab.worker import Worker
+from alpha_lab.workspace_lock import WorkspaceLock
 
 
 class JobExecutor(Protocol):
@@ -97,6 +98,7 @@ class Dispatcher:
         cpu_executor: CPUExecutor | None = None,
         adapter: object | None = None,
         supervisor: object | None = None,
+        workspace_lock: WorkspaceLock | None = None,
     ) -> None:
         self.provider = provider
         self.config = config
@@ -109,6 +111,8 @@ class Dispatcher:
         self.adapter = adapter
         self.supervisor = supervisor
         self._stop_requested = False
+        self._workspace_lock = workspace_lock
+        self._run_lock = threading.Lock()
         # Track which jobs are CPU vs GPU for polling
         self._cpu_job_ids: set[str] = set()
 
@@ -236,6 +240,11 @@ class Dispatcher:
                 logger.warning("Failed to cleanup CPU executor: %s", e)
 
         self._cleanup()
+        if self._workspace_lock is not None:
+            threads = [w._thread for w in self.workers if w._thread is not None]
+            if self._strategist_thread is not None:
+                threads.append(self._strategist_thread)
+            self._workspace_lock.retain_until(threads)
 
     def _cleanup(self) -> None:
         """Release this dispatcher's idle claims, retaining claims of live threads."""
@@ -255,6 +264,15 @@ class Dispatcher:
             self._log_file = None
 
     def recover(self) -> dict:
+        """Exclude other workspace owners before releasing any orphaned claim."""
+        if self._workspace_lock is not None:
+            if not self._workspace_lock.held or self._workspace_lock.workspace != Path(self.workspace).resolve():
+                raise RuntimeError("Dispatcher requires its workspace's acquired ownership lock")
+            return self._recover_owned()
+        with WorkspaceLock(self.workspace):
+            return self._recover_owned()
+
+    def _recover_owned(self) -> dict:
         """Recover from a crash: release orphaned workers and reconcile SLURM jobs.
 
         Returns a summary dict of recovery actions taken.
@@ -286,6 +304,12 @@ class Dispatcher:
                 exp.slurm_job_id: exp.name for exp in slurm_exps
                 if exp.slurm_job_id and exp.slurm_job_id not in self._cpu_job_ids
             })
+        recover_cpu = getattr(self.cpu_executor, "recover_running_jobs", None)
+        if callable(recover_cpu):
+            recover_cpu(self.workspace, {
+                exp.slurm_job_id: exp.name for exp in slurm_exps
+                if exp.slurm_job_id and exp.slurm_job_id in self._cpu_job_ids
+            })
         self._poll_slurm()
         summary["slurm_reconciled"] = sum(
             self.db.get(exp.id).status != exp.status for exp in slurm_exps
@@ -296,6 +320,25 @@ class Dispatcher:
         return summary
 
     def run(self) -> None:
+        """Hold workspace ownership through recovery, execution and shutdown."""
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("Dispatcher is already running")
+        owned = self._workspace_lock is None
+        try:
+            if owned:
+                self._workspace_lock = WorkspaceLock(self.workspace).acquire()
+            if not self._workspace_lock.held or self._workspace_lock.workspace != Path(self.workspace).resolve():
+                raise RuntimeError("Dispatcher workspace ownership is unavailable")
+            try:
+                self._run_owned()
+            finally:
+                self.stop()
+        finally:
+            if owned and self._workspace_lock is not None:
+                self._workspace_lock.release()
+            self._run_lock.release()
+
+    def _run_owned(self) -> None:
         """Main loop — blocks until stopped or max_experiments reached."""
         logger.info("Dispatcher starting")
         self._init_log()
@@ -383,6 +426,8 @@ class Dispatcher:
 
     def _should_run_strategist(self) -> bool:
         """Determine if it's time for a strategist turn."""
+        if self._stop_requested:
+            return False
         with self._state_lock:
             if self._strategist_running:
                 return False

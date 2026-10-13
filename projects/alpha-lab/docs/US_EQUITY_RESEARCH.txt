@@ -207,8 +207,14 @@ an attempt includes initialization failure after the claim. Checked experiments
 are reserved as queued before executor submission. Assigned checked work waits
 until its implementation worker releases the claim. Strategist pruning also
 requires unassigned to_implement work in an atomic database update.
-Only one research runner may own a workspace; startup recovery assumes the prior
-runner has stopped. A separate local viewer may inspect the same workspace.
+Only one research runner may own a workspace. Headless and interactive CLI
+runners acquire .alpha_lab_runner.lock before provider initialization; standalone
+Dispatcher.run and recover also enforce it before recovery. Interactive alpha-lab
+now requires --workspace. The OS releases the lock when its process dies; the file
+is retained and must not be removed to bypass an active owner. Live threads after
+a shutdown timeout retain ownership until they finish. The viewer may inspect the
+same workspace without becoming its research runner. This is exclusion on one
+local machine, not an attested distributed or network-filesystem lease.
 
 A queued reservation with no recorded job ID is an unresolved submission. An
 executor exception may occur after a process starts, so it remains queued with a
@@ -218,12 +224,24 @@ Check dispatcher.jsonl, local_job.json and the native process or scheduler state
 before explicitly resolving a row. If a job ID was returned but cannot be
 attached, the dispatcher logs it and requests cancellation; that request alone
 does not attest the job stopped. A later known job state clears only the matching
-UNKNOWN diagnostic. Native CPU IDs retain cpu- routing after restart; native GPU
-reattachment requires verified process identity. CPU process reattachment is not
-implemented, so a fresh CPU executor can leave prior jobs unresolved.
+UNKNOWN diagnostic. Native CPU IDs retain cpu- routing after restart. Both native
+CPU and GPU managers save invocation metadata atomically. Reattachment verifies
+job/resource/workspace/experiment, PID vintage, command, directory and Windows
+Job Object membership. Recovery preserves the original positive timeout, while
+a smaller current limit can tighten it. Terminal receipts use the full invocation
+ID; known success/failure/cancel/timeout states replay without rerunning work.
+Incomplete, legacy, missing or mismatched evidence remains UNKNOWN. A recovered
+process that exits without matching evidence is not promoted to success/failure
+from the legacy unscoped exit-code file. Local metadata is trusted workflow
+evidence, not cryptographic attestation or proof a strategy is economically valid.
+The former Linux fallback scanning process names is removed; incomplete old job
+records require manual reconciliation. Windows crash containment can terminate
+children before they write receipts, leaving unresolved evidence.
 Stopping workers blocks new tasks and prevents a preparing agent from starting.
 Shutdown keeps the claim of any worker thread still alive after the join timeout.
 Reporters use the configured reasoning effort, including high when chosen.
+Default pytest discovery is restricted to tests; archived source and synthetic
+research workspaces under data are preserved without being rediscovered as tests.
 
 External research-question chat is disabled unless --chat-config is provided.
 Copy examples/dashboard-chat.example.json to a local config and intentionally

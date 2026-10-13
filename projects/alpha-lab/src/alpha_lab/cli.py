@@ -174,6 +174,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workspace",
         type=str,
+        required=True,
         default=None,
         help="Workspace directory path",
     )
@@ -234,6 +235,15 @@ def print_banner(console: Console, model: str) -> None:
 def main() -> None:
     """Main entry point for alpha-lab CLI."""
     args = parse_args()
+    if not args.workspace.strip():
+        raise ValueError("An explicit workspace is required")
+    from alpha_lab.workspace_lock import WorkspaceLock
+    from contextlib import ExitStack
+    with WorkspaceLock(args.workspace), ExitStack() as resources:
+        _main_owned(args, resources)
+
+
+def _main_owned(args, resources) -> None:
 
     # Check for API key
     from alpha_lab.client import get_provider
@@ -249,6 +259,11 @@ def main() -> None:
     # Initialize components
     console = Console()
     provider = get_provider(args.provider, api_key=api_key)
+    close_provider = getattr(provider, 'close', None)
+    if callable(close_provider):
+        resources.callback(close_provider)
+    elif getattr(provider, 'openai_client', None) is not None:
+        resources.callback(provider.openai_client.close)
     prompt_session: PromptSession = PromptSession(history=InMemoryHistory())
 
     # Print banner
@@ -346,13 +361,7 @@ def main() -> None:
         console.print(f"\n[red]Fatal error: {e}[/red]")
         sys.exit(1)
     finally:
-        # Force exit — httpx connection pool threads can keep the process alive
-        if hasattr(provider, 'openai_client'):
-            try:
-                provider.openai_client.close()
-            except Exception:
-                pass
-        os._exit(0)
+        agent.stop()
 
 
 if __name__ == "__main__":

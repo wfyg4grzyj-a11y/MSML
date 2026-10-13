@@ -2,6 +2,11 @@
 
 import runpy
 import sys
+import json
+import os
+import re
+import tempfile
+import time
 from pathlib import Path
 
 
@@ -41,10 +46,28 @@ if __name__ == '__main__':
     try:
         run(gpu)
     except SystemExit as error:
-        code = error.code if isinstance(error.code, int) else (0 if error.code is None else 1)
+        code = int(error.code) if isinstance(error.code, int) else (0 if error.code is None else 1)
         raise
     except BaseException:
         code = 1
         raise
     finally:
         Path('local_exit_code.txt').write_text(str(code), encoding='utf-8')
+        job_id = os.environ.get('ALPHALAB_JOB_ID', '')
+        if re.fullmatch(r'[A-Za-z0-9_-]{1,80}', job_id):
+            receipt = {'schema_version': 1, 'job_id': job_id,
+                       'resource': 'gpu' if gpu else 'cpu', 'exit_code': code,
+                       'finished_at': time.time()}
+            absolute = os.path.abspath(f'local_job_result-{job_id}.json')
+            if os.name == 'nt' and not absolute.startswith('\\\\?\\'):
+                absolute = ('\\\\?\\UNC\\'+absolute[2:]) if absolute.startswith('\\\\') else '\\\\?\\'+absolute
+            path = Path(absolute)
+            descriptor, temporary = tempfile.mkstemp(prefix='job.', suffix='.tmp', dir=path.parent)
+            try:
+                with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+                    json.dump(receipt, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+            finally:
+                Path(temporary).unlink(missing_ok=True)

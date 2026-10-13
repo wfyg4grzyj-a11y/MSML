@@ -43,6 +43,13 @@ class AnthropicProvider:
         self._anthropic = anthropic_client
         self._openai = openai_client
 
+    def close(self) -> None:
+        """Release both owned SDK clients."""
+        try:
+            self._anthropic.close()
+        finally:
+            self._openai.close()
+
     @property
     def openai_client(self) -> OpenAI:
         """Expose the OpenAI client (used for web search proxy and summarization)."""
