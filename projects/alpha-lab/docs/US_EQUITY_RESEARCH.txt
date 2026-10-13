@@ -277,6 +277,23 @@ cancellation cannot prove when an upstream gateway stops billing.
 Plot export (optional; requires matplotlib):
   python examples/plot_equity_validation.py --validation data/market/research/validation-new
 
+Runner failure handling:
+The headless runner advances only after an invoked Phase 1 agent finishes and
+nonempty learnings/report evidence exists, and after Phase 2 explicitly returns
+success. A failed builder, critic or tester cannot reuse an existing PASS review
+or passing test output to advance. Phase 2 returns False when stopped or its
+iteration limit is exhausted. Deliberately omitted phases retain their configured
+ablation behavior; Phase 3-only configs do not imply a new scientific review.
+Dispatcher recovery must succeed before its work loop. Recovery/loop exceptions
+propagate to the caller, with failed events and executor/ownership cleanup.
+Dispatcher.run returns True only on its normal completion condition, and False
+on requested stop; interrupts propagate after cleanup. The headless event log
+records one terminal run phase after provider cleanup and before log closure:
+completed, failed or stopped. Failed/stopped CLI runs exit unsuccessfully.
+These guards check local workflow completion, not the validity of a strategy or
+the provenance of old resume files. Background proposer/worker errors retain
+their existing bounded retry/diagnostic behavior; they are not all fatal errors.
+
 Material research limitations: corrected vendor history is not a historical
 feed replay; the static security classification and ticker/issuer mappings are
 not fully point-in-time audited; terminal actions are not reconciled into all

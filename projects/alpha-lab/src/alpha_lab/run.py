@@ -39,6 +39,10 @@ _event_log_file = None
 _run_tag = ""
 
 
+class RunStoppedError(RuntimeError):
+    """A phase was stopped before completing the configured run."""
+
+
 def _log_event(event: AgentEvent) -> None:
     """Event callback: human-readable summary to stderr + full JSONL to event log."""
 
@@ -167,6 +171,18 @@ def _run_configured(args, config, workspace, workspace_lock) -> None:
         _run_configured_body(args, config, workspace, workspace_lock, resources)
 
 
+def _finish_run_event(exc_type, exc, traceback) -> bool:
+    """Record outcome after provider cleanup, while the event log is open."""
+    status = "completed"
+    if exc_type is not None:
+        status = "stopped" if issubclass(exc_type, (KeyboardInterrupt, RunStoppedError)) else "failed"
+    _log_event(PhaseEvent(
+        phase="run", step="complete", status=status,
+        detail=f"Headless run {status}",
+    ))
+    return False
+
+
 def _close_event_log() -> None:
     global _event_log_file
     if _event_log_file is not None:
@@ -183,6 +199,7 @@ def _run_configured_body(args, config, workspace, workspace_lock, resources) -> 
     event_log_dir.mkdir(parents=True, exist_ok=True)
     _event_log_file = open(event_log_dir / "events.jsonl", "a")
     resources.callback(_close_event_log)
+    resources.push(_finish_run_event)
     _run_tag = Path(workspace).name
     # Write run-start marker
     _event_log_file.write(json.dumps({
@@ -278,6 +295,12 @@ def _run_configured_body(args, config, workspace, workspace_lock, resources) -> 
             ))
         elif "phase1" in config.pipeline.phases:
             agent.run(initial_message)
+            if agent._stop_requested:
+                raise RunStoppedError("Phase 1 was stopped")
+            if not agent._done:
+                raise RuntimeError("Phase 1 agent did not complete successfully")
+            if not detect_phase1_complete(workspace):
+                raise RuntimeError("Phase 1 output is incomplete")
         else:
             logger.info("Phase 1 not in pipeline — skipping")
 
@@ -312,7 +335,7 @@ def _run_configured_body(args, config, workspace, workspace_lock, resources) -> 
                     )
 
             if not detect_phase1_complete(workspace):
-                logger.error("Cannot run Phase 2: Phase 1 output not found")
+                raise RuntimeError("Cannot run Phase 2: Phase 1 output not found")
             else:
                 logger.info("Starting Phase 2 pipeline")
                 pipeline = Pipeline(
@@ -322,7 +345,10 @@ def _run_configured_body(args, config, workspace, workspace_lock, resources) -> 
                     event_callback=_log_event,
                     adapter=adapter,
                 )
-                pipeline.run_phase2()
+                if pipeline.run_phase2() is not True:
+                    if pipeline._stop_requested:
+                        raise RunStoppedError("Phase 2 was stopped")
+                    raise RuntimeError("Phase 2 did not complete successfully")
 
         # Supervisor: review Phase 2
         if "phase2" in config.pipeline.phases:
@@ -391,7 +417,8 @@ def _run_configured_body(args, config, workspace, workspace_lock, resources) -> 
                 supervisor=supervisor,
                 workspace_lock=workspace_lock,
             )
-            dispatcher.run()
+            if dispatcher.run() is not True:
+                raise RunStoppedError("Phase 3 was stopped before completion")
 
     except KeyboardInterrupt:
         logger.info("Interrupted, stopping")
@@ -400,6 +427,7 @@ def _run_configured_body(args, config, workspace, workspace_lock, resources) -> 
             pipeline.stop()
         if dispatcher is not None:
             dispatcher.stop()
+        raise
     finally:
         # Clean up executors to prevent orphaned processes
         if executor is not None:
@@ -412,11 +440,6 @@ def _run_configured_body(args, config, workspace, workspace_lock, resources) -> 
                 cpu_executor.cleanup_all()
             except Exception as e:
                 logger.warning("Failed to cleanup CPU executor: %s", e)
-        if _event_log_file is not None:
-            try:
-                _event_log_file.close()
-            except OSError:
-                pass
 
 
 if __name__ == "__main__":

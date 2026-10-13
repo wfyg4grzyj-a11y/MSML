@@ -319,7 +319,7 @@ class Dispatcher:
         logger.info(f"Recovery complete: {summary}")
         return summary
 
-    def run(self) -> None:
+    def run(self) -> bool:
         """Hold workspace ownership through recovery, execution and shutdown."""
         if not self._run_lock.acquire(blocking=False):
             raise RuntimeError("Dispatcher is already running")
@@ -330,7 +330,7 @@ class Dispatcher:
             if not self._workspace_lock.held or self._workspace_lock.workspace != Path(self.workspace).resolve():
                 raise RuntimeError("Dispatcher workspace ownership is unavailable")
             try:
-                self._run_owned()
+                return self._run_owned()
             finally:
                 self.stop()
         finally:
@@ -338,7 +338,7 @@ class Dispatcher:
                 self._workspace_lock.release()
             self._run_lock.release()
 
-    def _run_owned(self) -> None:
+    def _run_owned(self) -> bool:
         """Main loop — blocks until stopped or max_experiments reached."""
         logger.info("Dispatcher starting")
         self._init_log()
@@ -354,14 +354,17 @@ class Dispatcher:
         # Ensure experiments directory exists
         Path(self.workspace, "experiments").mkdir(parents=True, exist_ok=True)
 
-        # Crash recovery before entering main loop
+        terminal_status = "failed"
+        terminal_detail = "Phase 3 experiment loop failed"
         try:
-            self.recover()
-        except Exception as e:
-            logger.error(f"Recovery failed: {e}")
-            self._log("recovery_error", error=str(e))
+            # Recovery must succeed before any new worker/API/submission work.
+            try:
+                self.recover()
+            except Exception as e:
+                logger.error(f"Recovery failed: {e}")
+                self._log("recovery_error", error=str(e))
+                raise
 
-        try:
             while not self._stop_requested:
                 # 1. Strategist turn (if due)
                 if self._should_run_strategist():
@@ -406,23 +409,34 @@ class Dispatcher:
                         break
                     time.sleep(1)
 
+            terminal_status = "stopped" if self._stop_requested else "completed"
+            terminal_detail = ("Phase 3 experiment loop stopped" if self._stop_requested
+                               else "Phase 3 experiment loop finished")
+        except KeyboardInterrupt:
+            terminal_status = "stopped"
+            terminal_detail = "Phase 3 experiment loop interrupted"
+            raise
         except Exception as e:
             logger.error(f"Dispatcher error: {e}")
             self._log("dispatcher_error", error=str(e), traceback=traceback.format_exc())
+            raise
         finally:
-            self._log("dispatcher_stop")
-            self.emit(PhaseEvent(
-                phase="phase3",
-                step="dispatcher",
-                status="completed",
-                detail="Phase 3 experiment loop finished",
-            ))
-            if self._log_file is not None:
-                try:
-                    self._log_file.close()
-                except OSError as e:
-                    logger.warning("Failed to close dispatcher log on shutdown: %s", e)
+            self._log("dispatcher_stop", status=terminal_status)
+            try:
+                self.emit(PhaseEvent(
+                    phase="phase3",
+                    step="dispatcher",
+                    status=terminal_status,
+                    detail=terminal_detail,
+                ))
+            finally:
+                if self._log_file is not None:
+                    try:
+                        self._log_file.close()
+                    except OSError as e:
+                        logger.warning("Failed to close dispatcher log on shutdown: %s", e)
             logger.info("Dispatcher stopped")
+        return terminal_status == "completed"
 
     def _should_run_strategist(self) -> bool:
         """Determine if it's time for a strategist turn."""
