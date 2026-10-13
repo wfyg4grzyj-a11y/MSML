@@ -1,0 +1,11 @@
+{
+  "root": "market/sharadar",
+  "tables": [
+    "descriptions", "tickers", "sp500", "actions", "events", "metrics",
+    "fundamentals", "daily", "stocks", "funds", "insiders",
+    "holdings", "holdings_ticker", "holdings_investor"
+  ],
+  "requests_per_minute": 30,
+  "memory_limit": "4GB",
+  "threads": 4
+}
