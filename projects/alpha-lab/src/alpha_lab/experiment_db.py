@@ -189,6 +189,22 @@ class ExperimentDB:
             finally:
                 conn.close()
 
+    def cancel_if_idle(self, exp_id: int) -> bool:
+        """Atomically prune unassigned work without overwriting an active claim."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                changed = conn.execute(
+                    "UPDATE experiments SET status = 'cancelled', updated_at = ? "
+                    "WHERE id = ? AND worker_id IS NULL "
+                    "AND status IN ('to_implement', 'implemented', 'checked', 'finished')",
+                    (time.time(), exp_id),
+                ).rowcount
+                conn.commit()
+                return changed == 1
+            finally:
+                conn.close()
+
     def release_worker(self, exp_id: int) -> None:
         now = time.time()
         with self._lock:

@@ -186,6 +186,21 @@ templates; model-generated titles and JSON specifications are never executed
 as code or used as directory paths. The dashboard can inspect this workspace's
 experiment database and leaderboard.
 
+Run the local viewer without starting a research campaign:
+  alpha-lab-serve --workspace data/market/research/experiments-new --host 127.0.0.1
+The viewer releases its log/file-watcher threads and background tasks on shutdown
+or partial startup failure. Restarting reloads a bounded history once, using the
+same byte cursors for replay and live logs. Complete UTF-8 JSON lines are consumed;
+partial writes wait for a newline, and replacement/truncation resets the cursor.
+Malformed and non-object records are skipped. Status reports share the history cap.
+Closing the viewer leaves independently running pipeline jobs under their owner.
+Board cancellation only prunes unassigned idle work; queued/running or assigned
+work must be cancelled through the research runner. Idle pruning uses an atomic
+conditional update so a concurrent active claim is not overwritten. Saved result
+evidence is retained when an idle row is pruned. Early compact board summaries may
+omit period labels; their detailed local results retain the explicit evaluation
+period. Avoid inferring a period from an unlabeled leaderboard number alone.
+
 Plot export (optional; requires matplotlib):
   python examples/plot_equity_validation.py --validation data/market/research/validation-new
 
