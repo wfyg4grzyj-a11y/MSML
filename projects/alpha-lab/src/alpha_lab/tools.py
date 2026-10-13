@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import re
+import fnmatch
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from alpha_lab.local_process import start_process
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +32,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             "Commands run inside the workspace directory."
             "Use this to run analysis scripts, install packages, etc. "
             "Write scripts to files first, then execute them."
+            + (" On Windows this tool uses PowerShell, not Bash." if os.name == "nt" else "")
         ),
         "parameters": {
             "type": "object",
@@ -138,7 +144,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
         "type": "function",
         "name": "grep_file",
         "description": (
-            "Search files in the workspace using grep. Returns matching lines "
+            "Search files in the workspace with a regex. Returns matching lines "
             "with file paths and line numbers."
         ),
         "parameters": {
@@ -475,30 +481,52 @@ def execute_shell(
 ) -> str:
     """Execute a shell command in the workspace directory."""
     timeout = min(max(timeout, 1), MAX_TIMEOUT)
-
+    proc = None
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
+        if os.name == "nt":
+            shell_command = (
+                "$ErrorActionPreference='Stop'; "
+                "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); "
+                "$OutputEncoding=[Console]::OutputEncoding; " + command
+                + "; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }"
+            )
+            args = ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", shell_command]
+        else:
+            args = ["/bin/sh", "-c", command]
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        proc = start_process(
+            args,
             cwd=workspace,
-            capture_output=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
         )
+        stdout, stderr = proc.communicate(timeout=timeout)
 
         output_parts = []
-        if result.stdout:
-            output_parts.append(result.stdout)
-        if result.stderr:
-            output_parts.append(f"[stderr]\n{result.stderr}")
-        output_parts.append(f"[exit code: {result.returncode}]")
+        if stdout:
+            output_parts.append(stdout)
+        if stderr:
+            output_parts.append(f"[stderr]\n{stderr}")
+        output_parts.append(f"[exit code: {proc.poll()}]")
 
         output = "\n".join(output_parts)
 
     except subprocess.TimeoutExpired:
+        proc.terminate_tree()
+        proc.communicate(timeout=5)
         output = f"[ERROR] Command timed out after {timeout}s"
     except Exception as e:
         output = f"[ERROR] {type(e).__name__}: {e}"
+    finally:
+        if proc is not None:
+            if proc.poll() is None:
+                proc.terminate_tree()
+            proc.close()
 
     return _truncate_output(output)
 
@@ -571,6 +599,33 @@ def grep_files(
     resolved = _resolve_in_workspace(path, workspace)
     if resolved is None:
         return f"[ERROR] Path outside workspace: {path}"
+    if os.name == "nt":
+        try:
+            regex = re.compile(pattern)
+            files = [resolved] if resolved.is_file() else resolved.rglob("*")
+            matches = []
+            length = 0
+            for file in files:
+                if not file.is_file() or (include and not fnmatch.fnmatch(file.name, include)):
+                    continue
+                if _resolve_in_workspace(str(file), workspace) is None:
+                    continue
+                try:
+                    with file.open(encoding="utf-8", errors="replace") as stream:
+                        for number, line in enumerate(stream, 1):
+                            if "\x00" in line:
+                                break
+                            if regex.search(line):
+                                match = f"{file.relative_to(Path(workspace).resolve())}:{number}:{line.rstrip()}"
+                                matches.append(match)
+                                length += len(match)
+                                if length > MAX_OUTPUT_CHARS:
+                                    return _truncate_output("\n".join(matches))
+                except OSError:
+                    continue
+            return "\n".join(matches) if matches else "No matches found."
+        except re.error as error:
+            return f"[ERROR] Invalid regex: {error}"
     # Use resolved path relative to workspace for grep cwd
     try:
         search_path = str(resolved.relative_to(Path(workspace).resolve()))
@@ -992,10 +1047,11 @@ def execute_tool(
         # Git checkpoint before patching
         import subprocess as _sp
         try:
-            _sp.run(
-                "git add -A && git commit -m 'checkpoint before supervisor patch' --allow-empty",
-                shell=True, cwd=workspace, capture_output=True, timeout=30,
-            )
+            result = _sp.run(["git", "add", "-A"], cwd=workspace,
+                             capture_output=True, timeout=30)
+            if result.returncode == 0:
+                _sp.run(["git", "commit", "-m", "checkpoint before supervisor patch", "--allow-empty"],
+                        cwd=workspace, capture_output=True, timeout=30)
         except Exception:
             pass  # Best-effort checkpoint
         target.write_text(content)
