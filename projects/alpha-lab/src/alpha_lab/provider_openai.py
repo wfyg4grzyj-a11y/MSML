@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Any
 
+import httpx
 from openai import OpenAI
 
 from alpha_lab.provider import Provider, Response, StreamEvent, ToolCall
@@ -76,6 +77,15 @@ class OpenAIProvider:
             include=["reasoning.encrypted_content"],
         )
         request.update(options or {})
+        request_budget = None
+        if self.runtime:
+            request_budget = self.runtime.request_timeout_seconds()
+            if request_budget<=0:
+                raise LLMRunError("LLM run deadline reached before request")
+            # Per-phase SDK timeouts are also shortened near the absolute cutoff.
+            request['timeout'] = httpx.Timeout(request_budget,
+                read=min(self.runtime.settings.read_timeout_seconds,request_budget),
+                connect=min(20.,request_budget))
         stream = self._client.responses.create(**request)
         timer = None
         expired = threading.Event()
@@ -86,7 +96,7 @@ class OpenAIProvider:
                     stream.close()
                 except (OSError, RuntimeError):
                     pass
-            remaining=self.runtime.settings.max_request_seconds-(time.monotonic()-started)
+            remaining=min(request_budget-(time.monotonic()-started),self.runtime.remaining_seconds())
             if remaining<=0:
                 stream.close()
                 raise LLMRunError("LLM request deadline reached before streaming")
@@ -110,7 +120,9 @@ class OpenAIProvider:
                     raise LLMRunError(f"LLM stream terminated with {event.type}")
                 elif event.type == "error":
                     raise LLMRunError("LLM stream reported an error event")
-                if expired.is_set():
+                if expired.is_set() or (self.runtime and self.runtime.remaining_seconds()<=0):
+                    if self.runtime and record is not None and raw_response is not None:
+                        self.runtime.record_usage(record,raw_response)
                     raise LLMRunError("LLM request deadline reached")
         finally:
             if timer:

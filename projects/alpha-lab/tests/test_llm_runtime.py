@@ -128,3 +128,57 @@ def test_unexpected_gateway_usage_blocks_further_calls():
     with pytest.raises(LLMRunError,match="budget"):
         with runtime.request("s",[],[]):
             pytest.fail("Gateway-added usage must count against the next-call budget")
+
+
+@pytest.mark.parametrize('deadline',['2026-10-13T23:46:00','not-a-date',True,123])
+def test_absolute_deadline_requires_a_timezone_and_valid_timestamp(deadline):
+    with pytest.raises(ValueError,match='explicit timezone'):
+        settings(deadline_utc=deadline)
+
+
+def test_authorization_cutoff_blocks_calls_even_with_run_budget_left(monkeypatch):
+    from datetime import datetime,timezone
+    now=datetime(2026,10,13,23,45,50,tzinfo=timezone.utc)
+    monkeypatch.setattr('alpha_lab.llm_runtime.utc_now',lambda:now)
+    runtime=LLMRuntime(settings(deadline_utc='2026-10-14T07:46:00+08:00'))
+    assert runtime.settings.deadline_utc=='2026-10-13T23:46:00+00:00'
+    assert runtime.request_timeout_seconds()==pytest.approx(10.)
+    now=datetime(2026,10,13,23,46,0,tzinfo=timezone.utc)
+    with pytest.raises(LLMRunError,match='deadline'):
+        with runtime.request('s',[],[]):
+            pytest.fail('Must not send a request after authorization expires')
+    assert runtime.calls==0 and runtime.reserved_tokens==0
+
+
+def test_provider_shortens_sdk_timeout_near_absolute_cutoff(monkeypatch):
+    from datetime import datetime,timezone
+    monkeypatch.setattr('alpha_lab.llm_runtime.utc_now',lambda:datetime(2026,10,13,23,45,55,tzinfo=timezone.utc))
+    client=MagicMock()
+    response=NS(id='r',output=[],usage=NS(input_tokens=1,output_tokens=1),status='completed')
+    stream=MagicMock();stream.__iter__.return_value=iter([NS(type='response.completed',response=response)])
+    client.responses.create.return_value=stream
+    provider=OpenAIProvider(client,runtime=LLMRuntime(settings(deadline_utc='2026-10-13T23:46:00Z')))
+    list(provider.stream_response(model='gpt-5.6-sol',system='s',history=[],tools=[],reasoning_effort='medium'))
+    timeout=client.responses.create.call_args.kwargs['timeout']
+    assert 0<timeout.read<=5 and 0<timeout.connect<=5
+
+
+def test_response_after_cutoff_is_failed_but_known_usage_is_preserved(monkeypatch):
+    from datetime import datetime,timezone
+    now=datetime(2026,10,13,23,45,59,tzinfo=timezone.utc)
+    monkeypatch.setattr('alpha_lab.llm_runtime.utc_now',lambda:now)
+    runtime=LLMRuntime(settings(deadline_utc='2026-10-13T23:46:00Z'))
+    response=NS(id='r',output=[],usage=NS(input_tokens=20,output_tokens=8),status='completed')
+    def late_events():
+        nonlocal now
+        now=datetime(2026,10,13,23,46,0,tzinfo=timezone.utc)
+        yield NS(type='response.completed',response=response)
+    client=MagicMock()
+    stream=MagicMock();stream.__iter__.side_effect=late_events
+    client.responses.create.return_value=stream
+    provider=OpenAIProvider(client,runtime=runtime)
+    with pytest.raises(LLMRunError,match='deadline'):
+        list(provider.stream_response(model='gpt-5.6-sol',system='s',history=[],tools=[],reasoning_effort='medium'))
+    assert runtime.records[0]['status']=='failed'
+    assert runtime.input_tokens==20 and runtime.output_tokens==8
+    stream.close.assert_called_once()

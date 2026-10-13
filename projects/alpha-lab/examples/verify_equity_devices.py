@@ -4,13 +4,12 @@ import json
 import time
 from pathlib import Path
 
-import duckdb
 import numpy as np
 
 from alpha_lab.experiment_db import ExperimentDB
 from alpha_lab.local_cpu import LocalCPUManager
 from alpha_lab.local_gpu import LocalGPUManager
-from alpha_lab.market_neutral import neutral_weights
+from alpha_lab.market_neutral import MarketNeutralBacktest, neutral_weights
 
 
 SCRIPT='''
@@ -26,25 +25,46 @@ else:
     assert torch.cuda.is_available()
 raw=np.load(config['inputs'],allow_pickle=False)
 errors=[]; nets=[]; betas=[]; caps=[]
-started=time.perf_counter()
-for i in range(int(raw['batch_count'])):
-    score=torch.as_tensor(raw[f'score_{i}'],dtype=torch.float64,device=device)
-    beta=torch.as_tensor(raw[f'beta_{i}'],dtype=torch.float64,device=device)
+def project_values(score_values,beta_values):
+    score=torch.as_tensor(score_values,dtype=torch.float64,device=device)
+    beta=torch.as_tensor(beta_values,dtype=torch.float64,device=device)
     design=torch.stack((torch.ones_like(beta),beta),dim=1)
     residual=score-design@(torch.linalg.pinv(design)@score)
-    weight=residual/torch.abs(residual).sum()
+    gross=torch.abs(residual).sum()
+    if float(gross.item())<1e-10:
+        return np.zeros(len(score_values))
+    weight=residual/gross
     weight=weight*torch.minimum(torch.as_tensor(1.,device=device),.02/torch.abs(weight).max())
-    value=weight.cpu().numpy()
-    errors.append(float(np.max(np.abs(value-raw[f'reference_{i}']))))
-    nets.append(abs(float(value.sum())))
-    betas.append(abs(float(value@raw[f'beta_{i}'])))
-    caps.append(float(np.max(np.abs(value))))
+    return weight.cpu().numpy()
+def project(i):
+    return project_values(raw[f'score_{i}'],raw[f'beta_{i}'])
+started=time.perf_counter()
+project(0)  # Initialize allocation, BLAS and CUDA/SVD libraries before timing.
+sanity_beta=np.linspace(.2,2.,100)
+assert np.max(np.abs(project_values(3*sanity_beta+5,sanity_beta)))==0
+assert np.max(np.abs(project_values(np.zeros(100),sanity_beta)))==0
 if device=='cuda':torch.cuda.synchronize()
+initialization=time.perf_counter()-started
+timings=[]
+for trial in range(3):
+    if device=='cuda':torch.cuda.synchronize()
+    started=time.perf_counter()
+    for i in range(int(raw['batch_count'])):
+        value=project(i)
+        errors.append(float(np.max(np.abs(value-raw[f'reference_{i}']))))
+        nets.append(abs(float(value.sum())))
+        betas.append(abs(float(value@raw[f'beta_{i}'])))
+        caps.append(float(np.max(np.abs(value))))
+    if device=='cuda':torch.cuda.synchronize()
+    timings.append(time.perf_counter()-started)
 result={'device':torch.cuda.get_device_name(0) if device=='cuda' else 'CPU',
         'torch':torch.__version__,'cuda':torch.version.cuda,'batches':int(raw['batch_count']),
         'max_numpy_difference':max(errors),'max_net_exposure':max(nets),
         'max_estimated_beta_exposure':max(betas),'max_name_weight':max(caps),
-        'calculation_seconds':time.perf_counter()-started}
+        'calculation_seconds':float(np.median(timings)),
+        'initialization_seconds':initialization,'warm_trial_seconds':timings,
+        'degenerate_projection_checks':2,
+        'timing_scope':'All supplied monthly projections, host/device transfers and parity checks'}
 assert result['max_numpy_difference']<1e-8
 assert result['max_net_exposure']<1e-10
 assert result['max_estimated_beta_exposure']<1e-10
@@ -63,7 +83,7 @@ def main():
     if workspace.exists():raise ValueError('Use a new device verification directory')
     workspace.mkdir(parents=True)
     spec=json.loads(args.selection.read_text())['selected']['result']['spec']
-    features=duckdb.read_parquet(str(args.panel/'features.parquet')).df()
+    features=MarketNeutralBacktest(args.panel).features
     batches={}
     count=0
     for date,cross in features.groupby('date',sort=True):

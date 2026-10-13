@@ -29,13 +29,22 @@ provide that data path.
 
 The panel uses monthly universes of the 500 largest qualifying primary domestic
 common stocks, including currently delisted names. Formation uses raw price >=$5,
-20-observation dollar volume >=$5m, and dated market cap >=$500m. It uses ART
+20-session average dollar volume >=$5m with all 20 quotes present, 252 valid
+price observations in the preceding 252 sessions, and dated market cap >=$500m. It uses ART
 as-reported trailing financials, a two-calendar-day filing lag, and a maximum
 filing age of 550 days. DAILY market cap is converted from USD millions to USD.
-Signals use percentile ranks. Price momentum uses 21/63/252 observed stock-price
-rows; volatility and beta use the aligned SPY session calendar. Historical gaps
-can therefore extend the momentum calendar window. No current index membership
-is used. Static domestic security categories are not a dated security master.
+Signals use percentile ranks. Momentum requires exact prices 21/63/252 SPY
+sessions earlier; gaps never substitute an older quote. Volatility, beta and
+liquidity also use the SPY session calendar. A gap-spanning price change is missing
+rather than a one-session return. Nonpositive adjusted quotes are missing.
+No current index membership is used. Static domestic security categories are not
+a dated security master. Earlier panel versions used observed-row momentum;
+retain those versions and their results when correcting the preparation method.
+Preparation verifies pinned raw-source hashes and records its implementation
+hash. Loading verifies panel hashes before reading and rejects inconsistent
+array dimensions, duplicate identities/dates, impossible price returns,
+missing benchmark sessions and future accounting information. Legacy panels
+without complete hashes are explicitly marked unverified.
 
 Portfolio construction projects scores off an intercept and trailing SPY beta.
 Gross exposure is at most 1; each name is capped at 2% by reducing overall gross.
@@ -45,8 +54,32 @@ turnover includes changes caused by portfolio drift. Orders for unavailable name
 are removed using information from the execution close. Newly missing prices are
 marked stale and trigger a neutral portfolio repair for the following interval.
 The missing exposure and nearby corporate actions remain available for audit.
-The base calculation does not assume an unverified terminal payout. An adverse
-30% exposure charge on both long and short missing prices is a separate stress.
+The base uses a zero marked return and assumed exit at the last observed price.
+This is provisional accounting, not a verified economic terminal outcome. An
+adverse 30% exposure charge on both long and short missing prices is a separate
+stress. Result artifacts explicitly keep investment_ready and
+terminal_actions_reconciled false.
+
+Audit terminal events from an existing frozen study without changing its P&L:
+  python -m alpha_lab.equity_actions --panel data/market/research/panel-original --validation data/market/research/validation-original --output data/market/research/terminal-audit-new
+This pins and verifies raw stocks/actions/tickers/dictionary sources. Cash and
+stock consideration are additive only for standard acquisitioncash and
+acquisitionstock packages. Elections, foreign cash, special classes and warrants
+are not added to default consideration. Delisting/merger/bankruptcy values are
+market caps, not per-share proceeds. Diagnostic stock marks use raw receiving-
+security quotes on the audited missing-price session, including a newly listed
+successor where an exact quote exists. No earlier or later quote substitutes for
+that date. SEP quote currency and the pinned USD/share dictionary define the
+price basis; SF1 functional reporting currency does not. Settlement timing,
+information availability and distribution/share bases remain unresolved. This
+is ex-post diagnostic evidence, not historically admissible strategy input.
+
+Compare a panel correction using identical snapshots and the original frozen spec:
+  python -m alpha_lab.equity_panel_audit --original-panel data/market/research/panel-original --corrected-panel data/market/research/panel-corrected --selection data/market/research/validation-original/selection-frozen.json --output data/market/research/comparison-new
+The comparison commits to the existing spec before calculations and evaluates
+only train/validation. It rejects a mismatched source vintage or accidental
+holdout output. Universe and feature changes are retained separately; the
+original selection, panel and holdout artifacts remain immutable.
 
 Base frictions are 10 bps of one-way traded notional and 3% annual short borrow
 (252-session convention). Cash interest and financing spreads are omitted; the
@@ -74,6 +107,11 @@ Reported usage also stops further requests when it exceeds the reservation cap.
 Failed calls retain their reservation. Partial/failed/incomplete streams cannot
 complete an agent successfully. Local bootstrap seeds do not make LLM sampling
 deterministic. Future runs still require intentional parameter choices.
+For unattended runs, pass --deadline-utc with the explicitly authorized cutoff
+(an ISO timestamp with timezone). It is saved alongside the controls, blocks
+requests after that time, and shortens SDK/stream deadlines as it approaches.
+The same optional deadline_utc field is available in llm_runtime JSON configs.
+Client cancellation cannot establish when an upstream gateway stops billing.
 
 Shared controls for the general pipeline can be enabled in a run.py JSON config:
   "model": "gpt-6-sol",
@@ -100,6 +138,9 @@ Device verification (optional; requires CUDA PyTorch):
 This uses AlphaLab's native Windows CPU/GPU subprocess managers to project real
 monthly factors and compare NumPy with CPU/CUDA float64 results. Small cross-
 sections typically run faster on CPU; neural experiments can use the GPU.
+Initialization is measured separately from three synchronized warm trials.
+Timing includes transfers and parity checks; it is not a kernel-only benchmark.
+Zero and fully neutralized scores are checked for zero positions on both devices.
 
 Export the generated strategies as ordinary AlphaLab experiments:
   python -m alpha_lab.equity_experiment --panel data/market/research/panel-new --run data/market/research/run-new --workspace data/market/research/experiments-new

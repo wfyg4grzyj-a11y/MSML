@@ -20,6 +20,53 @@ FEATURES = ("book_yield", "earnings_yield", "fcf_yield", "roa", "gross_profitabi
             "leverage", "momentum_12_1", "momentum_3_1", "reversal_1m", "low_vol")
 
 
+def create_session_prices(db):
+    """Use exact benchmark sessions; missing quotes never extend a lookback.
+
+    Inputs are stocks, securities and calendar(date, session) views/tables.
+    RANGE frames avoid materializing a dense security/session cross product.
+    """
+    db.execute("""CREATE TABLE prices AS
+        SELECT p.ticker,p.date,c.session,p.closeunadj,p.closeadj,
+          CASE WHEN c.session-lag(c.session) OVER w=1
+                    AND p.closeadj>0 AND isfinite(p.closeadj)
+                    AND lag(p.closeadj) OVER w>0 AND isfinite(lag(p.closeadj) OVER w)
+               THEN p.closeadj/lag(p.closeadj) OVER w-1 END ret,
+          avg(CASE WHEN p.close>0 AND isfinite(p.close)
+                        AND p.volume>=0 AND isfinite(p.volume)
+                   THEN p.close*p.volume END) OVER recent adv20,
+          count(CASE WHEN p.close>0 AND isfinite(p.close)
+                          AND p.volume>=0 AND isfinite(p.volume) THEN 1 END)
+              OVER recent liquidity_observations,
+          count(CASE WHEN p.closeadj>0 AND isfinite(p.closeadj) THEN 1 END)
+              OVER (PARTITION BY p.ticker ORDER BY c.session
+                    RANGE BETWEEN 251 PRECEDING AND CURRENT ROW) observations,
+          max(CASE WHEN p.closeadj>0 AND isfinite(p.closeadj) THEN p.closeadj END)
+              OVER (PARTITION BY p.ticker ORDER BY c.session
+                    RANGE BETWEEN 21 PRECEDING AND 21 PRECEDING) p21,
+          max(CASE WHEN p.closeadj>0 AND isfinite(p.closeadj) THEN p.closeadj END)
+              OVER (PARTITION BY p.ticker ORDER BY c.session
+                    RANGE BETWEEN 63 PRECEDING AND 63 PRECEDING) p63,
+          max(CASE WHEN p.closeadj>0 AND isfinite(p.closeadj) THEN p.closeadj END)
+              OVER (PARTITION BY p.ticker ORDER BY c.session
+                    RANGE BETWEEN 252 PRECEDING AND 252 PRECEDING) p252
+        FROM stocks p JOIN securities USING(ticker) JOIN calendar c USING(date)
+        WINDOW w AS (PARTITION BY p.ticker ORDER BY c.session),
+               recent AS (PARTITION BY p.ticker ORDER BY c.session
+                          RANGE BETWEEN 19 PRECEDING AND CURRENT ROW)""")
+
+
+def create_research_calendar(db, start, end):
+    db.execute('''CREATE TABLE calendar AS SELECT date,
+                  row_number() OVER(ORDER BY date) AS "session"
+                  FROM funds WHERE ticker='SPY'
+                  AND date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+                  ORDER BY date''', [start,end])
+    count, unique = db.execute("SELECT count(*),count(DISTINCT date) FROM calendar").fetchone()
+    if count<2 or count!=unique:
+        raise ValueError("Benchmark session calendar is empty or duplicated")
+
+
 def prepare_panel(config: Path, output: Path, *, start="2014-01-01", end="2025-12-31",
                   universe_size=500):
     """Pin snapshots; monthly universes use dated price, liquidity and market cap.
@@ -27,39 +74,40 @@ def prepare_panel(config: Path, output: Path, *, start="2014-01-01", end="2025-1
     The static domestic primary-common-stock metadata restriction is disclosed:
     it is not a dated security master. Never restrict to currently active names.
     """
-    if (output / "panel.json").exists():
+    start_date, end_date = pd.Timestamp(start), pd.Timestamp(end)
+    if (pd.isna(start_date) or pd.isna(end_date) or start_date > end_date or isinstance(universe_size, bool)
+            or not isinstance(universe_size,int) or universe_size < 30):
+        raise ValueError("Invalid date range or universe size; at least 30 securities required")
+    warmup = (start_date - pd.DateOffset(years=2)).strftime("%Y-%m-%d")
+    if output.exists() and any(output.iterdir()):
         raise ValueError("Choose a new panel directory; existing panels are immutable")
     output.mkdir(parents=True, exist_ok=True)
     store, _, _ = load_config(config)
     sources = {table: store.latest(table) for table in
                ("stocks", "funds", "daily", "fundamentals", "tickers", "actions")}
+    for source in sources.values():
+        if file_hash(Path(source['path']))!=source['parquet_sha256']:
+            raise ValueError("Pinned raw-source hash mismatch")
+    preparation_hash = file_hash(Path(__file__))
     atomic_json(output / "sources.json", sources)
     with store._connect() as db:
         for table, source in sources.items():
             db.read_parquet(source["path"]).create_view(table)
-        db.execute("""CREATE TABLE calendar AS SELECT date FROM funds
-                      WHERE ticker='SPY' AND date BETWEEN DATE '2012-01-01' AND CAST(? AS DATE)
-                      ORDER BY date""", [end])
+        create_research_calendar(db,warmup,end)
         db.execute("""CREATE TABLE months AS SELECT MAX(date) date FROM calendar
                       WHERE date >= CAST(? AS DATE) GROUP BY date_trunc('month',date)""", [start])
         db.execute("""CREATE TABLE securities AS SELECT DISTINCT ticker FROM tickers
                       WHERE "table"='SF1' AND currency='USD'
                       AND category IN ('Domestic Common Stock','Domestic Common Stock Primary Class')""")
         print("Preparing dated prices and rolling liquidity", flush=True)
-        db.execute("""CREATE TABLE prices AS SELECT p.*,
-                      closeadj/lag(closeadj) OVER w-1 ret,
-                      avg(close*volume) OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) adv20,
-                      count(*) OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 251 PRECEDING AND CURRENT ROW) observations,
-                      lag(closeadj,21) OVER w p21, lag(closeadj,63) OVER w p63,
-                      lag(closeadj,252) OVER w p252
-                      FROM stocks p JOIN securities USING(ticker)
-                      WHERE date BETWEEN DATE '2012-01-01' AND CAST(? AS DATE)
-                      WINDOW w AS (PARTITION BY ticker ORDER BY date)""", [end])
+        create_session_prices(db)
         db.execute("""CREATE TABLE snapshots AS SELECT p.ticker,p.date,p.closeunadj,p.adv20,
                       d.marketcap*1000000 marketcap, p.p21/p.p252-1 momentum_12_1,
                       p.p21/p.p63-1 momentum_3_1, -(p.closeadj/p.p21-1) reversal_1m
                       FROM prices p JOIN months m USING(date) JOIN daily d USING(ticker,date)
-                      WHERE p.observations=252 AND p.closeunadj>=5 AND p.adv20>=5000000
+                      WHERE p.observations=252 AND p.liquidity_observations=20
+                      AND p.p21>0 AND p.p63>0 AND p.p252>0
+                      AND p.closeunadj>=5 AND p.adv20>=5000000
                       AND d.marketcap>=500
                       QUALIFY row_number() OVER (PARTITION BY p.date ORDER BY d.marketcap DESC,p.ticker)<=?""", [universe_size])
         snapshots = db.execute("SELECT * FROM snapshots ORDER BY ticker,date").df()
@@ -91,8 +139,9 @@ def prepare_panel(config: Path, output: Path, *, start="2014-01-01", end="2025-1
     features["filing_age_days"] = (features.date - features.filing_date).dt.days
     prices["date"] = pd.to_datetime(prices.date)
     benchmark["date"] = pd.to_datetime(benchmark.date)
-    calendar = pd.DatetimeIndex(benchmark.loc[benchmark.date.between("2012-01-01", end), "date"])
+    calendar = pd.DatetimeIndex(benchmark.loc[benchmark.date.between(warmup, end), "date"])
     closes = prices.pivot(index="date", columns="ticker", values="closeadj").reindex(index=calendar, columns=tickers)
+    closes = closes.where((closes>0) & np.isfinite(closes))
     # No forward-filled returns. Gaps are observed by the backtester explicitly.
     returns = closes.pct_change(fill_method=None)
     spy = benchmark.set_index("date").closeadj.reindex(calendar).pct_change(fill_method=None)
@@ -109,12 +158,20 @@ def prepare_panel(config: Path, output: Path, *, start="2014-01-01", end="2025-1
                         tickers=np.asarray(tickers, dtype="U32"), returns=returns.to_numpy(dtype=np.float32),
                         price_observed=np.isfinite(closes.to_numpy()),
                         spy=spy.to_numpy(dtype=np.float32))
-    manifest = {"start": start, "end": end, "universe_size": universe_size,
+    manifest = {"schema_version": 3, "preparation_sha256": preparation_hash,
+                "raw_source_hashes_verified": True,
+                "start": start, "end": end, "universe_size": universe_size,
                 "historical_tickers": len(tickers), "monthly_rows": len(features),
                 "months": features.date.nunique(), "features": list(FEATURES),
                 "filing_lag_calendar_days": 2, "max_filing_age_days": 550,
                 "minimum_raw_price": 5, "minimum_adv20_usd": 5_000_000,
                 "minimum_marketcap_usd": 500_000_000,
+                "price_window_policy": {
+                    "calendar": "SPY observed US sessions; no quote forward fill",
+                    "momentum_offsets_sessions": [21,63,252],
+                    "liquidity_sessions": 20, "minimum_liquidity_observations": 20,
+                    "history_sessions": 252, "minimum_history_observations": 252,
+                    "gap_spanning_daily_returns": "missing, never assigned to one session"},
                 "point_in_time_attested": False, "terminal_actions_reconciled": False,
                 "limitations": ["Corrected vendor snapshot, not historical feed replay",
                                 "Static domestic primary common-stock metadata filter",
@@ -176,20 +233,54 @@ def performance(returns, spy):
 
 class MarketNeutralBacktest:
     def __init__(self, panel: Path):
-        self.panel = Path(panel)
-        self.features = duckdb.read_parquet(str(panel / "features.parquet")).df()
-        raw = np.load(panel / "returns.npz", allow_pickle=False)
-        self.dates = pd.DatetimeIndex(raw["dates"])
-        self.tickers = raw["tickers"].tolist()
-        self.returns = raw["returns"].astype(float)
-        self.spy = raw["spy"].astype(float)
-        self.price_observed = raw["price_observed"] if "price_observed" in raw else None
-        self.positions = {ticker:i for i,ticker in enumerate(self.tickers)}
+        self.panel = panel = Path(panel)
+        self.panel_integrity_verified = False
         if (panel/"panel.json").exists():
             manifest=json.loads((panel/"panel.json").read_text())
-            for name, expected in manifest.get("files",{}).items():
+            files=manifest.get("files",{})
+            if not isinstance(files,dict):
+                raise ValueError("Research panel file hashes are invalid")
+            for name, expected in files.items():
+                if name not in {"sources.json","features.parquet","actions.parquet","returns.npz"}:
+                    raise ValueError("Unknown research panel file")
                 if file_hash(panel/name)!=expected:
                     raise ValueError("Research panel file hash mismatch")
+            self.panel_integrity_verified = set(files)=={
+                "sources.json","features.parquet","actions.parquet","returns.npz"}
+        self.features = duckdb.read_parquet(str(panel / "features.parquet")).df()
+        with np.load(panel / "returns.npz", allow_pickle=False) as raw:
+            self.dates = pd.DatetimeIndex(raw["dates"])
+            self.tickers = raw["tickers"].tolist()
+            self.returns = raw["returns"].astype(float)
+            self.spy = raw["spy"].astype(float)
+            self.price_observed = raw["price_observed"] if "price_observed" in raw else None
+        if (self.dates.hasnans or not self.dates.is_monotonic_increasing or not self.dates.is_unique
+                or len(self.dates)<2 or len(set(self.tickers))!=len(self.tickers)
+                or not self.tickers or any(not isinstance(t,str) or not t for t in self.tickers)):
+            raise ValueError("Research panel dates or security identities are invalid")
+        if self.returns.shape!=(len(self.dates),len(self.tickers)) or self.spy.shape!=(len(self.dates),):
+            raise ValueError("Research panel array dimensions are inconsistent")
+        if (np.isinf(self.returns).any() or np.any(self.returns < -1) or np.isinf(self.spy).any()
+                or not np.isfinite(self.spy[1:]).all() or np.any(self.spy < -1)):
+            raise ValueError("Research panel contains impossible returns or missing benchmark sessions")
+        if self.price_observed is not None and (
+                self.price_observed.shape!=self.returns.shape or self.price_observed.dtype!=np.dtype(bool)):
+            raise ValueError("Research panel price-observation mask is invalid")
+        if self.price_observed is not None and np.any(np.isfinite(self.returns[1:]) & ~(
+                self.price_observed[1:] & self.price_observed[:-1])):
+            raise ValueError("Research panel assigns finite price returns to missing quote pairs")
+        required={"ticker","date","beta","filing_date"}
+        if not required<=set(self.features):
+            raise ValueError("Research panel feature columns are incomplete")
+        if (self.features.duplicated(["ticker","date"]).any()
+                or not self.features.ticker.isin(self.tickers).all()
+                or not self.features.date.isin(self.dates).all()):
+            raise ValueError("Research panel features have duplicate or unmatched identities/dates")
+        if (self.features.filing_date>self.features.date).any() or (
+                "available_date" in self.features
+                and (self.features.available_date>self.features.date).any()):
+            raise ValueError("Research panel contains future accounting information")
+        self.positions = {ticker:i for i,ticker in enumerate(self.tickers)}
 
     def evaluate(self, spec, *, include_holdout=False, cost_bps=10., borrow_bps=300.,
                  terminal_stress=.0):
@@ -279,6 +370,10 @@ class MarketNeutralBacktest:
                   "missing_event_details": missing_details,
                   "max_abs_net_exposure": float(np.max(np.abs(np.asarray(exposures)[:,0]))),
                   "mean_gross_exposure": float(np.mean(np.asarray(exposures)[:,1])),
+                  "panel_integrity_verified": self.panel_integrity_verified,
+                  "missing_price_policy": "Zero marked return, assumed stale-price exit and subsequent repair; economic proceeds unresolved",
+                  "terminal_actions_reconciled": False,
+                  "investment_ready": False,
                   "research_only": True}
         for name, begin, finish in (("train","2014-01-01","2019-12-31"),
                                      ("validation","2020-01-01","2022-12-31"),

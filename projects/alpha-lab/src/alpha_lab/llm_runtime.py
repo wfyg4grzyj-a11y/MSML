@@ -7,11 +7,16 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 class LLMRunError(RuntimeError):
     """A safe terminal error; agent-level retries must not repeat this call."""
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -26,6 +31,7 @@ class LLMSettings:
     read_timeout_seconds: int = 120
     max_context_bytes: int = 64_000
     verbosity: str = "low"
+    deadline_utc: str | None = None
 
     def __post_init__(self):
         if self.model not in {"gpt-5.6-sol", "gpt-6-sol", "gpt-6.1-sol"}:
@@ -33,11 +39,19 @@ class LLMSettings:
         if self.reasoning_effort not in {"medium", "high"}:
             raise ValueError("Select medium or high reasoning explicitly")
         for name, value in asdict(self).items():
-            if name not in {"model", "reasoning_effort", "verbosity"}:
+            if name not in {"model", "reasoning_effort", "verbosity", "deadline_utc"}:
                 if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                     raise ValueError(f"{name} must be a positive integer")
         if self.verbosity not in {"low", "medium", "high"}:
             raise ValueError("Invalid text verbosity")
+        if self.deadline_utc is not None:
+            try:
+                deadline = datetime.fromisoformat(self.deadline_utc)
+                if deadline.tzinfo is None or deadline.utcoffset() is None:
+                    raise ValueError
+            except (ValueError,TypeError):
+                raise ValueError("deadline_utc requires an ISO timestamp with an explicit timezone") from None
+            object.__setattr__(self,'deadline_utc',deadline.astimezone(timezone.utc).isoformat())
 
 
 class LLMRuntime:
@@ -52,12 +66,22 @@ class LLMRuntime:
         self.settings = settings
         self.ledger = ledger
         self.started = time.monotonic()
+        self.deadline = datetime.fromisoformat(settings.deadline_utc) if settings.deadline_utc else None
         self.calls = 0
         self.reserved_tokens = 0
         self.input_tokens = 0
         self.output_tokens = 0
         self.records = []
         self._lock = threading.Lock()
+
+    def remaining_seconds(self):
+        remaining = self.settings.max_run_seconds - (time.monotonic()-self.started)
+        if self.deadline is not None:
+            remaining = min(remaining,(self.deadline-utc_now()).total_seconds())
+        return remaining
+
+    def request_timeout_seconds(self):
+        return max(0.,min(self.settings.max_request_seconds,self.remaining_seconds()))
 
     def save(self):
         if self.ledger:
@@ -80,14 +104,15 @@ class LLMRuntime:
             reserve = size + 8192 + cap
             if size > s.max_context_bytes:
                 raise LLMRunError("Explicit context byte limit reached; no automatic truncation")
-            if time.monotonic() - self.started >= s.max_run_seconds:
+            if self.remaining_seconds() <= 0:
                 raise LLMRunError("LLM run deadline reached")
             used=max(self.reserved_tokens,self.input_tokens+self.output_tokens)
             if self.calls >= s.max_calls or used + reserve > s.max_reserved_tokens:
                 raise LLMRunError("LLM call or reserved-token budget reached")
             self.calls += 1
             self.reserved_tokens += reserve
-            record = {"call": self.calls, "reserved_tokens": reserve, "status": "started"}
+            record = {"call": self.calls, "reserved_tokens": reserve, "status": "started",
+                      "remaining_run_seconds":round(self.remaining_seconds(),3)}
             self.records.append(record)
             self.save()
             request_start = time.monotonic()

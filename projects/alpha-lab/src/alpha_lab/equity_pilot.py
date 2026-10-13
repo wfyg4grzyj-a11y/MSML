@@ -109,14 +109,13 @@ class EquityResearchTools:
         atomic_json(self.workspace/"experiments.json",self.experiments)
         return result
 
-def run_pilot(panel,workspace,model,reasoning_effort):
-    from alpha_lab.agent import AgentLoop
-    from alpha_lab.context import ContextManager
+def run_pilot(panel,workspace,model,reasoning_effort,*,deadline_utc=None):
     if workspace.exists():
         raise ValueError("Choose a new run directory to avoid duplicate campaigns")
     workspace.mkdir(parents=True)
     settings=LLMSettings(model,reasoning_effort,max_calls=16,max_reserved_tokens=500_000,
-                         max_output_tokens=4096,max_run_seconds=5400,max_context_bytes=64_000)
+                         max_output_tokens=4096,max_run_seconds=5400,max_context_bytes=64_000,
+                         deadline_utc=deadline_utc)
     manifest={"started_utc":datetime.now(timezone.utc).isoformat(),"panel":str(panel.resolve()),
               "llm":asdict(settings),"max_experiments":8,"seed":20261013,
               "parameters":{"sdk_retries":0,"agent_retries":0,"concurrency":1,
@@ -133,6 +132,14 @@ def run_pilot(panel,workspace,model,reasoning_effort):
               "holdout":"Frozen 2023-2025; no agent access; selection on validation only",
               "authorization":"User authorized unattended LLM research for this 10-hour period; simulations only"}
     atomic_json(workspace/"run.json",manifest)
+    if settings.deadline_utc and datetime.now(timezone.utc)>=datetime.fromisoformat(settings.deadline_utc):
+        manifest.update(agent_finished=False,experiment_count=0,
+                        stopped_reason='authorization_deadline_reached',
+                        completed_utc=datetime.now(timezone.utc).isoformat())
+        atomic_json(workspace/"run.json",manifest)
+        return manifest
+    from alpha_lab.agent import AgentLoop
+    from alpha_lab.context import ContextManager
     load_dotenv(".env")
     provider=bounded_provider(settings,workspace/"llm-usage.json")
     designer=PublicStrategyDesigner(workspace)
@@ -157,11 +164,15 @@ def run_pilot(panel,workspace,model,reasoning_effort):
     agent.run("Design bounded fundamental/market-data US equity market-neutral candidate strategies now.")
     # No LLM calls below this boundary: private data is evaluated exclusively here.
     local=EquityResearchTools(panel,workspace)
+    stopped_reason=None
     for spec in designer.candidates:
+        if settings.deadline_utc and datetime.now(timezone.utc)>=datetime.fromisoformat(settings.deadline_utc):
+            stopped_reason='authorization_deadline_reached_before_local_experiment'
+            break
         local.evaluate(spec)
     manifest.update(completed_utc=datetime.now(timezone.utc).isoformat(),
                     agent_finished=bool(agent._done and designer.report),
-                    experiment_count=len(local.experiments),events=events)
+                    experiment_count=len(local.experiments),events=events,stopped_reason=stopped_reason)
     atomic_json(workspace/"run.json",manifest)
     return manifest
 
@@ -177,11 +188,12 @@ def main():
     pilot.add_argument("--workspace",type=Path,required=True)
     pilot.add_argument("--model",required=True)
     pilot.add_argument("--reasoning-effort",required=True)
+    pilot.add_argument("--deadline-utc",help="ISO timestamp with timezone; stops requests at the authorization cutoff")
     args=parser.parse_args()
     if args.command=="prepare":
         prepare_panel(args.config,args.output)
     else:
-        result=run_pilot(args.panel,args.workspace,args.model,args.reasoning_effort)
+        result=run_pilot(args.panel,args.workspace,args.model,args.reasoning_effort,deadline_utc=args.deadline_utc)
         print(json.dumps({"agent_finished":result["agent_finished"],"experiments":result["experiment_count"]}),flush=True)
         if not result["agent_finished"]:
             raise SystemExit(1)
