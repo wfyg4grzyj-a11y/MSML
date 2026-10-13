@@ -202,6 +202,75 @@ in `catalog`, with `not_implemented` status; requesting them gives an explicit
 error. Their adapters and account entitlements must be added before ingestion.
 No LLM campaign or recurring schedule is started by these commands.
 
+### Read-only equity-risk handoff
+
+The sibling `projects/equity-risk/docs/DATA_INTERFACE.md` defines an audited
+session/security panel. Raw table access and a prepared `RiskPanel` are separate
+stages. The infrastructure command below supplies immutable source bindings and
+complete shared benchmark/cash/calendar arrays, with panel readiness explicitly
+false until the historical preparation audits are completed.
+
+```powershell
+python -m pip install -e ".[risk-data]"
+python -m alpha_lab.market_data.risk_handoff --config data/market/sharadar.json --interface ../equity-risk/docs/DATA_INTERFACE.md --output data/market/handoffs/risk-v1 --download-cash
+# Offline repeat using the archived public cash CSV; always use a new directory.
+python -m alpha_lab.market_data.risk_handoff --config data/market/sharadar.json --output data/market/handoffs/risk-v2 --cash-csv data/market/handoffs/risk-v1/cash-DGS3MO.csv
+```
+
+Each handoff pins and hashes the seven required Sharadar tables. It archives
+the exact interface document, the raw FRED DGS3MO cash-yield CSV, a
+`shared_series.npz` with pickle-free arrays, `sources.json`, and checksummed
+`COMPLETE.json`. The command reads the source lake without syncing, publishing,
+changing pointers or writing temporary files there. An interrupted output is
+marked `INCOMPLETE` and cannot be loaded. Old pinned source versions must be
+retained while consumer runs reference them.
+
+The selected S&P 500 benchmark is SPY's Sharadar `closeadj` total-return proxy,
+including ETF expenses and tracking differences; it is not the official SPTR
+index. Cash uses the annual percentage yield in public FRED DGS3MO: simple
+ACT/365F accrual across calendar days between adjacent closes. The rate is the
+latest observation dated strictly before the preceding session, carried forward
+at most seven calendar days. It is a documented Treasury-yield cash proxy,
+not an actual deposit or traded bill return. These are shared input conventions
+for all three risk models. Source references are embedded in `sources.json`.
+
+XNYS sessions and early closes come from a recorded `exchange_calendars`
+version. SPY must have a valid price for every session and its preceding session.
+The default return range therefore starts on the session after the first
+Sharadar price and ends at the last common complete stock/SPY date. No missing
+benchmark/cash observations become zero, and requested unsupported date ranges
+fail rather than silently changing the benchmark or splicing feeds.
+
+Consumer access from the shared Python environment:
+
+```python
+import numpy as np
+from alpha_lab.market_data.risk_handoff import load_handoff, iter_source_rows
+
+bundle = load_handoff("data/market/handoffs/risk-v1", verify_sources=True)
+rows = iter_source_rows(bundle, "stocks", tickers=["AAPL"],
+                        start="2025-01-01", end="2025-12-31",
+                        columns=["ticker", "date", "closeadj", "closeunadj", "close", "volume"])
+# Iterate/aggregate rows without loading the entire stocks table into Python.
+dictionary = list(iter_source_rows(bundle, "descriptions", columns=["table", "indicator", "unittype"]))
+with np.load("data/market/handoffs/risk-v1/shared_series.npz", allow_pickle=False) as inputs:
+    dates, benchmark, cash = inputs["dates"], inputs["market_returns"], inputs["cash_returns"]
+```
+
+Consumers in separate environments can query `sources[table].path` with
+DuckDB directly. Filter dates/tickers, quote column identifiers (including the
+reserved `table` field), and read pinned paths instead of following `latest.json`
+again. The sibling reader's unquoted projection of `table` fails; reading the
+complete dictionary or using `iter_source_rows` avoids that projection issue.
+
+Current corrected vendor snapshots and conservative date lags do not establish
+an original feed replay. The handoff does not attest point-in-time security
+panels or reconciled terminal outcomes. Its readiness record enumerates issuer
+links/cap treatment, dated eligibility/SIC, accounting/common-book checks,
+listing-age evidence and terminal-action audits still required before producing
+the model's `panel.npz` and `metadata.json`. A schema match alone does not justify
+setting the contract's producer attestation booleans to true.
+
 ### Tiingo daily market data
 
 The market data CLI runs independently of the research agents and makes no
