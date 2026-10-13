@@ -63,12 +63,19 @@ def get_provider(
         if runtime_settings is not None:
             import httpx
             from alpha_lab.llm_runtime import LLMRuntime
-            client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY", ""),
+            key = api_key or os.environ.get("OPENAI_API_KEY", "")
+            if not key or not key.strip():
+                raise ValueError("OPENAI_API_KEY must be set before configuring a bounded run")
+            if runtime is None and ledger is None:
+                raise ValueError("A bounded provider requires a fresh ledger or an explicitly shared runtime")
+            control = runtime or LLMRuntime(runtime_settings, ledger)
+            control.check_active()
+            client = OpenAI(api_key=key,
                             base_url=os.environ.get("OPENAI_BASE_URL"), max_retries=0,
                             timeout=httpx.Timeout(min(runtime_settings.read_timeout_seconds,
                                                      runtime_settings.max_request_seconds),
                                                   connect=min(20,runtime_settings.max_request_seconds)))
-            return OpenAIProvider(client, runtime=runtime or LLMRuntime(runtime_settings, ledger))
+            return OpenAIProvider(client, runtime=control)
         return OpenAIProvider(get_client(api_key))
     elif provider_name in ("anthropic", "bedrock"):
         if runtime_settings is not None:

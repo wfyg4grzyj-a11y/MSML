@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -64,7 +66,11 @@ class LLMRuntime:
 
     def __init__(self, settings: LLMSettings, ledger: Path | None = None):
         self.settings = settings
-        self.ledger = ledger
+        self.ledger = Path(ledger).resolve() if ledger is not None else None
+        self.intent = (self.ledger.with_suffix(self.ledger.suffix + ".intent.json")
+                       if self.ledger is not None else None)
+        self.run_id = uuid.uuid4().hex
+        self.created_utc = utc_now().isoformat()
         self.started = time.monotonic()
         self.deadline = datetime.fromisoformat(settings.deadline_utc) if settings.deadline_utc else None
         self.calls = 0
@@ -78,6 +84,33 @@ class LLMRuntime:
         self._ledger_lock = threading.Lock()
         self._request_active = False
         self._terminal_reason = None
+        if self.ledger is not None:
+            self._initialize_ledger()
+
+    def _initialize_ledger(self) -> None:
+        """Claim a fresh path once; reused evidence must never reset a budget."""
+        try:
+            if self.ledger.exists() or self.intent.exists():
+                raise FileExistsError
+            self.ledger.parent.mkdir(parents=True, exist_ok=True)
+            # Exclusive creation handles competing initializers on one filesystem.
+            # Keep this intent even after setup failure or usage-file loss.
+            with self.intent.open("x", encoding="utf-8") as handle:
+                json.dump({"schema_version": 1, "run_id": self.run_id,
+                           "created_utc": self.created_utc,
+                           "ledger": str(self.ledger), "settings": asdict(self.settings),
+                           "restart_policy": "fresh_run_required; no automatic resume"},
+                          handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            if self.ledger.exists():
+                raise FileExistsError
+            self.save()
+        except FileExistsError:
+            raise LLMRunError("Existing LLM ledger or intent found; use a new run directory with reviewed controls") from None
+        except OSError:
+            raise LLMRunError("LLM ledger initialization failed; preserve its intent and use a new run directory") from None
 
     def remaining_seconds(self):
         remaining = self.settings.max_run_seconds - (time.monotonic()-self.started)
@@ -125,7 +158,9 @@ class LLMRuntime:
         if self.ledger:
             with self._ledger_lock:
                 with self._state_lock:
-                    payload = {"settings": asdict(self.settings), "calls": self.calls,
+                    payload = {"schema_version": 2, "run_id": self.run_id,
+                               "created_utc": self.created_utc,
+                               "settings": asdict(self.settings), "calls": self.calls,
                                "reserved_tokens": self.reserved_tokens,
                                "reported_input_tokens": self.input_tokens,
                                "reported_output_tokens": self.output_tokens,

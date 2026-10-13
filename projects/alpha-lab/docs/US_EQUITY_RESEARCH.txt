@@ -309,9 +309,26 @@ completion. A tool result arriving after the time cutoff remains logged but
 cannot promote the agent to success. Limits check admission; arbitrary shell
 tools already executing may outlive their admission check until their own
 timeout/cancellation completes. Upstream gateway billing termination is not
-attested. These controls apply to the active runtime, not a durable cross-process
-budget ledger: restart accounting still needs explicit review and a fresh run
-manifest. Generic runs without llm_runtime retain their existing behavior.
+attested.
+
+File-backed bounded runtimes require a fresh usage path. Initialization exclusively
+creates and flushes usage.json.intent.json (or the equivalent ledger name), then
+writes zero-call usage before SDK setup. Both files identify the run and its
+intentionally selected controls. Existing usage or intent files block restart;
+they are preserved without parsing, migrating or resetting prior budgets. Lost
+usage, corrupt/legacy evidence and partial setup still require a new reviewed run
+directory; deleting usage alone cannot reopen its intent. The provider factory
+checks credentials, fresh ledger eligibility and runtime limits before SDK setup.
+Helper providers can share the same live runtime and its counters. In-memory
+runtimes have no durable restart guarantee; a new bounded provider requires a
+ledger or an explicitly shared runtime.
+Controlled campaign resume is unavailable. A later resume implementation must
+reconcile interrupted requests, elapsed time, original controls and record
+provenance before admitting more calls. This guard validates exclusive creation
+on the local Windows filesystem, not tamper-resistant storage or a distributed
+lease. Preserve old evidence and choose a new immutable manifest intentionally
+when starting a distinct campaign. Generic runs without llm_runtime retain their
+existing behavior.
 
 Material research limitations: corrected vendor history is not a historical
 feed replay; the static security classification and ticker/issuer mappings are
