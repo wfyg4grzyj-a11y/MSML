@@ -133,6 +133,8 @@ class SharadarStore:
         table = table_name(table)
         version = uuid.uuid4().hex
         stage = self.root / "staging" / version
+        if stage.resolve() != stage:
+            raise SharadarError("Staging path must stay within the configured storage root")
         stage.mkdir(parents=True)
         csv_path = stage / "source.csv"
         parquet = stage / "data.parquet"
@@ -189,6 +191,8 @@ class SharadarStore:
             (stage / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
             csv_path.unlink()
             destination = self.root / "tables" / table / version
+            if stage.resolve() != stage or destination.resolve() != destination:
+                raise SharadarError("Snapshot paths must stay within the configured storage root")
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(stage, destination)
             atomic_json(destination.parent / "latest.json", {"version": version})
@@ -201,7 +205,10 @@ class SharadarStore:
             raise SharadarError("ZIP, CSV or typed-data validation failed; previous snapshot retained") from None
         finally:
             if stage.exists():
-                shutil.rmtree(stage)
+                resolved_stage = stage.resolve()
+                if resolved_stage.parent != self.root / "staging" or resolved_stage.name != version:
+                    raise SharadarError("Refusing to remove an unexpected staging directory")
+                shutil.rmtree(resolved_stage)
 
     def export(self, table, destination, *, tickers=None, start=None, end=None, dimension=None, columns=None):
         """Offline filtered CSV with provenance; never overwrite an existing export."""
