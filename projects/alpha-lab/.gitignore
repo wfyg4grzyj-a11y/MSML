@@ -27,6 +27,7 @@ events.jsonl
 test_data/*.csv
 test_data/*.parquet
 data/*.parquet
+data/market/
 # Keep the synthetic test data
 !data/exchange_rates.csv
 
@@ -36,6 +37,7 @@ frontend/dist/
 
 # Secrets
 .env
+.env.*
 *.env
 !.env.example
 secrets.env

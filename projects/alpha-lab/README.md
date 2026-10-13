@@ -143,6 +143,75 @@ Generated code must also use portable Python paths and process APIs. CUDA kernel
 compilation and Linux-only libraries may require additional domain-specific work;
 the local runner support does not make every research domain Windows-compatible.
 
+### Tiingo daily market data
+
+The market data CLI runs independently of the research agents and makes no
+LLM calls. It stores US stock/ETF daily bars in SQLite, including raw OHLCV,
+split/dividend-adjusted OHLCV, `div_cash`, and `split_factor`.
+
+Add `TIINGO_API_KEY=...` to your ignored local `.env`. Keep the key out of
+configuration JSON and source control. Authentication uses the Authorization
+header; the token is never placed in the request URL or printed in errors.
+
+Edit `data/tiingo.example.json` for your ticker universe and start date, or
+copy it to an ignored local file. Database paths resolve relative to the
+configuration file. The example stores data under ignored `data/market/`.
+It covers SPY from Tiingo's earliest reported date, January 29, 1993.
+Omitting `end_date` requests through yesterday UTC to avoid a partial US day.
+
+Run from the project directory in your Python environment:
+
+```powershell
+python -m alpha_lab.market_data.cli --config data/tiingo.example.json sync
+python -m alpha_lab.market_data.cli --config data/tiingo.example.json status
+python -m alpha_lab.market_data.cli --config data/tiingo.example.json export --output data/market/snapshots/daily-v1.csv
+```
+
+After reinstalling the editable package, `alpha-lab-data` is an equivalent
+entry point. `sync --env-file <path>` loads another local secret file.
+Standard `HTTPS_PROXY` environment settings are respected.
+
+Updates re-fetch a configurable overlap (seven calendar days by default) and
+upsert `(ticker, date)` without duplicates. New dividends/splits or changed
+overlapping bars trigger a full refresh of the cached coverage so historical
+adjustments stay consistent. Requested coverage is recorded separately from
+the first trading date, handling holidays and IPOs. Use `sync --full-refresh`
+periodically to pick up older corrections outside the overlap. Requests are
+paced at 30/minute by default with bounded retries for transient failures and
+HTTP 429. Set the rate for your Tiingo account limits; no quota is assumed.
+
+Each ticker update commits bars, metadata, response JSON hashes and an audit
+record in one SQLite transaction. Failed updates preserve cached bars and
+can be retried. A refresh missing previously cached dates is rejected for
+review rather than silently deleting history. Sync exits nonzero if any
+ticker fails. `status` and `export` operate entirely offline.
+
+CSV snapshots include a SHA-256/provenance manifest and cannot overwrite an
+existing snapshot. Use a new filename after updates. Research code can read
+them with pandas, or query the local store directly:
+
+```python
+from alpha_lab.market_data import MarketStore
+import pandas as pd
+
+with MarketStore("data/market/tiingo.sqlite3") as store:
+    bars = pd.DataFrame(store.prices(["SPY", "QQQ"], start="2020-01-01"))
+closes = bars.pivot(index="date", columns="ticker", values="adj_close")
+returns = closes.pct_change(fill_method=None)
+```
+
+Tiingo's adjusted history is the current back-adjusted series, not a
+point-in-time dataset. `fetched_at` records retrieval time, not historical
+availability. Preserve snapshots for reproducibility. No exchange calendar,
+survivorship-free universe, forward filling, or trading signals are inferred.
+Choose historical universes and chronological train/test splits explicitly
+when building experiments.
+
+Provider references: [EOD fields](https://www.tiingo.com/documentation/end-of-day),
+[header authentication](https://www.tiingo.com/documentation/general/connecting),
+and [adjustment refresh guidance](https://www.tiingo.com/kb/article/the-fastest-method-to-ingest-tiingo-end-of-day-stock-api-data/).
+Tests run without network access: `python -m pytest tests/test_market_data.py`.
+
 ### 2. Configure API keys
 
 ```bash

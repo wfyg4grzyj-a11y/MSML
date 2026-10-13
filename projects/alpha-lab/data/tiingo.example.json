@@ -1,0 +1,7 @@
+{
+  "tickers": ["SPY"],
+  "start_date": "1993-01-29",
+  "database": "market/tiingo.sqlite3",
+  "requests_per_minute": 30,
+  "overlap_days": 7
+}
