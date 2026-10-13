@@ -43,7 +43,7 @@ def get_anthropic_client():
 def get_provider(
     provider_name: str = "openai",
     api_key: str | None = None,
-    *, runtime_settings=None, ledger=None,
+    *, runtime_settings=None, ledger=None, runtime=None,
 ) -> Provider:
     """Return a configured Provider instance.
 
@@ -54,6 +54,10 @@ def get_provider(
     api_key : str, optional
         Explicit API key for OpenAI.  Ignored for Anthropic.
     """
+    if runtime is not None:
+        if runtime_settings is not None or ledger is not None:
+            raise ValueError("Pass either an existing runtime or new runtime settings")
+        runtime_settings = runtime.settings
     if provider_name == "openai":
         from alpha_lab.provider_openai import OpenAIProvider
         if runtime_settings is not None:
@@ -64,7 +68,7 @@ def get_provider(
                             timeout=httpx.Timeout(min(runtime_settings.read_timeout_seconds,
                                                      runtime_settings.max_request_seconds),
                                                   connect=min(20,runtime_settings.max_request_seconds)))
-            return OpenAIProvider(client, runtime=LLMRuntime(runtime_settings, ledger))
+            return OpenAIProvider(client, runtime=runtime or LLMRuntime(runtime_settings, ledger))
         return OpenAIProvider(get_client(api_key))
     elif provider_name in ("anthropic", "bedrock"):
         if runtime_settings is not None:

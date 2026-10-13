@@ -25,6 +25,10 @@ class OpenAIProvider:
         self._client = client
         self.runtime = runtime
 
+    def close(self) -> None:
+        """Release the SDK client, including when legacy proxy access is disabled."""
+        self._client.close()
+
     @property
     def openai_client(self) -> OpenAI | None:
         """Expose the underlying OpenAI client (used for web search proxy)."""

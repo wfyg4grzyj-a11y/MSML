@@ -1,0 +1,19 @@
+{
+  "data_scope": "public_only",
+  "base_url": null,
+  "run_directory": null,
+  "max_question_bytes": null,
+  "llm": {
+    "model": null,
+    "reasoning_effort": null,
+    "max_output_tokens": null,
+    "max_calls": null,
+    "max_reserved_tokens": null,
+    "max_run_seconds": null,
+    "max_request_seconds": null,
+    "read_timeout_seconds": null,
+    "max_context_bytes": null,
+    "verbosity": null,
+    "deadline_utc": null
+  }
+}

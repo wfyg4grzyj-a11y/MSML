@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from alpha_lab.events import AgentEvent, FileChangedEvent
@@ -287,6 +287,10 @@ _runtime_active = False
 # Set by serve_main.
 _workspace: str = ""
 _adapter_cache: dict = {}  # {"adapter": DomainAdapter | None}
+_chat_config_path: Path | None = None
+_chat_session: Any = None
+_chat_configuration_error: str | None = None
+_chat_request_tasks: set[asyncio.Task] = set()
 
 
 def _load_jsonl_history(tailer: LogTailer) -> None:
@@ -319,6 +323,7 @@ def _load_jsonl_history(tailer: LogTailer) -> None:
 
 async def startup() -> None:
     global file_watcher, log_tailer, _broadcast_task, _status_report_task, _server_start_time
+    global _chat_session, _chat_configuration_error
 
     _server_start_time = time.time()
     loop = asyncio.get_running_loop()
@@ -328,6 +333,17 @@ async def startup() -> None:
     event_history.clear()
     connected_websockets.clear()
     _adapter_cache.clear()
+    _chat_session = None
+    _chat_configuration_error = None
+    if _chat_config_path is not None:
+        try:
+            from dotenv import load_dotenv
+            from alpha_lab.dashboard_chat import PublicChatSession
+            load_dotenv()
+            _chat_session = PublicChatSession(_chat_config_path)
+        except Exception as error:
+            _chat_configuration_error = "External research chat configuration is invalid or its run directory already exists."
+            logger.warning("External chat disabled: %s",type(error).__name__)
 
     _broadcast_task = asyncio.create_task(_broadcast_loop())
     _status_report_task = asyncio.create_task(_status_report_timer())
@@ -359,12 +375,19 @@ async def startup() -> None:
 async def shutdown() -> None:
     """Release only viewer-owned resources; pipeline jobs run independently."""
     global file_watcher, log_tailer, _broadcast_task, _status_report_task, _server_start_time
+    global _chat_session, _chat_configuration_error
+    if _chat_session is not None:
+        try:
+            await asyncio.to_thread(_chat_session.close)
+        except Exception as error:
+            logger.warning("Chat cleanup failed: %s",type(error).__name__)
     owners=[owner for owner in (file_watcher,log_tailer) if owner is not None]
     for owner in owners:
         owner._stop_event.set()
     if owners:
         await asyncio.gather(*(asyncio.to_thread(owner.stop) for owner in owners))
     tasks=set(_manual_status_tasks)
+    tasks.update(_chat_request_tasks)
     tasks.update(task for task in (_broadcast_task,_status_report_task) if task is not None)
     for task in tasks:
         task.cancel()
@@ -377,6 +400,9 @@ async def shutdown() -> None:
             pass
     connected_websockets.clear()
     _manual_status_tasks.clear()
+    _chat_request_tasks.clear()
+    _chat_session = None
+    _chat_configuration_error = None
     file_watcher = log_tailer = None
     _broadcast_task = _status_report_task = None
     _server_start_time = 0.
@@ -816,111 +842,49 @@ async def get_leaderboard() -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Chat endpoint for status queries
+# Explicit public research-question chat
 # ---------------------------------------------------------------------------
 
 
+@app.get("/api/chat-config")
+async def get_chat_config() -> JSONResponse:
+    if _chat_session is None:
+        return JSONResponse({"enabled":False,"workspace_context":False,
+                             "reason":_chat_configuration_error or "External research chat is not configured."})
+    return JSONResponse(_chat_session.describe())
+
+
 @app.post("/api/chat")
-async def chat_query(body: dict) -> JSONResponse:
-    """Answer questions about the system status using an LLM.
-
-    Accepts {"question": "what's happening?"} and returns {"answer": "..."}.
-    """
-    if not _workspace:
-        return JSONResponse({"error": "Workspace not configured"}, status_code=400)
-
-    question = body.get("question", "").strip()
-    if not question:
-        return JSONResponse({"error": "No question provided"}, status_code=400)
-
+async def chat_query(request: Request) -> JSONResponse:
+    """One consented public question; no automatic workspace context or history."""
+    raw=await request.body()
+    if len(raw)>131_072:
+        return JSONResponse({"error":"Question request exceeds the HTTP body limit."},status_code=413)
     try:
-        # Build context from current state
-        context_parts = []
-
-        # Board summary
-        manager._try_load_db()
-        if manager.db is not None:
-            summary = manager.db.board_summary()
-            context_parts.append("## Experiment Board Status")
-            for status, count in sorted(summary.items()):
-                context_parts.append(f"  {status}: {count}")
-
-            # Leaderboard
-            _chat_metric = "sharpe"
-            _chat_metric_display = "Sharpe"
-            if _adapter_cache.get("adapter") is not None:
-                _chat_metric = _adapter_cache["adapter"].metric.primary_metric
-                _chat_metric_display = _adapter_cache["adapter"].metric.display_name
-            leaders = manager.db.leaderboard(_chat_metric, 5)
-            if leaders:
-                context_parts.append(f"\n## Top 5 Experiments (by {_chat_metric_display})")
-                for i, exp in enumerate(leaders, 1):
-                    metrics = {}
-                    if exp.results_json:
-                        try:
-                            metrics = json.loads(exp.results_json)
-                        except (ValueError, TypeError):
-                            pass
-                    val = metrics.get(_chat_metric, "?")
-                    context_parts.append(f"  {i}. {exp.name} — {_chat_metric_display}: {val}")
-
-            # Recent errors
-            all_exps = manager.db.list_all()
-            errors = [e for e in all_exps if e.error][-5:]
-            if errors:
-                context_parts.append("\n## Recent Errors")
-                for exp in errors:
-                    context_parts.append(f"  #{exp.id} {exp.name}: {exp.error[:100]}...")
-
-        # System status
-        context_parts.append(f"\n## System Status")
-        context_parts.append(f"  Workspace: {_workspace}")
-
-        # Read recent log entries
-        log_path = Path(_workspace) / "logs" / "dispatcher.jsonl"
-        if log_path.exists():
-            try:
-                lines = log_path.read_text().strip().split("\n")[-20:]
-                context_parts.append("\n## Recent Dispatcher Log (last 20 entries)")
-                for line in lines:
-                    try:
-                        entry = json.loads(line)
-                        action = entry.get("action", "unknown")
-                        context_parts.append(f"  {action}: {json.dumps({k: v for k, v in entry.items() if k not in ['t', 'action']})[:100]}")
-                    except (ValueError, TypeError):
-                        pass
-            except Exception:
-                pass
-
-        context = "\n".join(context_parts)
-
-        # Call LLM to answer
-        from alpha_lab.client import get_provider
-        chat_provider = get_provider("openai")
-        try:
-            answer = chat_provider.complete(
-                model="gpt-4.1-mini",
-                system=(
-                    "You are a helpful assistant for Alpha Lab, an autonomous ML research system. "
-                    "Answer the user's question about the system status based on the context provided. "
-                    "Be concise and specific. If you don't have enough information, say so."
-                ),
-                messages=[
-                    {"role": "user", "content": f"## Current System State\n{context}\n\n## User Question\n{question}"},
-                ],
-            )
-        finally:
-            if hasattr(chat_provider, 'openai_client'):
-                try:
-                    chat_provider.openai_client.close()
-                except Exception:
-                    pass
-
-        return JSONResponse({"answer": answer})
-
-    except Exception as e:
-        logger.error(f"Chat query failed: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500)
+        body=json.loads(raw)
+    except (ValueError,UnicodeDecodeError):
+        return JSONResponse({"error":"Expected a public-question JSON request."},status_code=400)
+    if not isinstance(body,dict) or set(body)!={"question","consent_to_send"}:
+        return JSONResponse({"error":"Only question and consent_to_send are accepted; workspace context is disabled."},status_code=400)
+    if body["consent_to_send"] is not True:
+        return JSONResponse({"error":"Confirm sending this public question to the configured endpoint."},status_code=400)
+    session=_chat_session
+    if session is None:
+        return JSONResponse({"error":"External research chat is disabled. Configure its model and limits explicitly."},status_code=503)
+    from alpha_lab.dashboard_chat import ChatError
+    task=asyncio.create_task(asyncio.to_thread(session.answer,body["question"]))
+    _chat_request_tasks.add(task)
+    try:
+        answer=await task
+        return JSONResponse({"answer":answer,"model":session.settings.model,
+                             "reasoning_effort":session.settings.reasoning_effort,"workspace_context":False})
+    except ChatError as error:
+        return JSONResponse({"error":str(error)},status_code=error.status_code)
+    except Exception as error:
+        logger.warning("Research chat failed: %s",type(error).__name__)
+        return JSONResponse({"error":"Research chat failed; no automatic retry."},status_code=502)
+    finally:
+        _chat_request_tasks.discard(task)
 
 
 # ---------------------------------------------------------------------------
@@ -955,6 +919,11 @@ def serve_main() -> None:
         help="Workspace directory path to monitor",
     )
     parser.add_argument(
+        "--chat-config",
+        type=Path,
+        help="Optional explicit public-question chat controls; disabled when omitted",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=8000,
@@ -968,8 +937,9 @@ def serve_main() -> None:
     )
     args = parser.parse_args()
 
-    global _workspace
+    global _workspace, _chat_config_path
     _workspace = os.path.abspath(args.workspace)
+    _chat_config_path = args.chat_config.resolve() if args.chat_config else None
     manager.workspace = _workspace
 
     print(f"Workspace: {_workspace}")

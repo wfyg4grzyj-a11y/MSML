@@ -163,8 +163,8 @@ This is an example selection, not a permanent default. The shared provider
 enforces it across phase agents and summaries; legacy direct-client web proxies
 are disabled in bounded mode. The general pipeline's file/shell tools remain
 broader than this restricted equity designer, so its data flow needs separate
-review before a private-data campaign. Interactive dashboard chat is separate
-from a run.py campaign and does not inherit that campaign's ledger.
+review before a private-data campaign. Dashboard public-question chat has its
+own explicitly configured session budget; it does not inherit a run.py ledger.
 
 Device verification (optional; requires CUDA PyTorch):
   python examples/verify_equity_devices.py --panel data/market/research/panel-new --selection data/market/research/validation-new/selection-frozen.json --workspace data/market/research/devices-new
@@ -200,6 +200,37 @@ conditional update so a concurrent active claim is not overwritten. Saved result
 evidence is retained when an idle row is pruned. Early compact board summaries may
 omit period labels; their detailed local results retain the explicit evaluation
 period. Avoid inferring a period from an unlabeled leaderboard number alone.
+
+External research-question chat is disabled unless --chat-config is provided.
+Copy examples/dashboard-chat.example.json to a local config and intentionally
+fill every null field: HTTPS endpoint, one approved model, medium/high reasoning, output/call/
+reserved-token/run/request/read/context limits, verbosity, an aware UTC cutoff,
+question byte cap and a new run_directory. No permanent model or parameter
+defaults are selected by the example. Relative run directories resolve against
+the config file's parent. Existing run directories cannot reset a session budget.
+  alpha-lab-serve --workspace data/market/research/experiments-new --host 127.0.0.1 --chat-config PATH_TO_LOCAL_CONFIG
+The configured HTTPS base_url must match OPENAI_BASE_URL; keep OPENAI_API_KEY
+in the local .env or environment, never in the chat config or a question. The
+viewer loads .env locally when explicit chat controls are supplied. Configure
+HTTPS_PROXY for the PC's proxy if needed. Invalid/expired controls keep the
+viewer usable while disabling external chat.
+
+Only data_scope=public_only is supported. Each confirmed request sends the
+submitted question and fixed public instructions, without automatic workspace
+files, logs, records, results, tools or prior chat history. Questions must be
+public; this is an input-scope declaration, not automatic classification of
+arbitrary pasted text. Workspace feedback remains unavailable. Local status,
+board and result panels remain available without LLM calls.
+All questions share one runtime starting at configuration. SDK retries are zero;
+concurrent questions are rejected rather than queued. Responses use the chosen
+model/effort, store=false, explicit output/context caps and bounded deadlines.
+Failed/incomplete responses do not display success; raw gateway errors and known
+API credentials are not returned. Controls, usage and status are recorded locally,
+while question and answer text are not saved. intent.json remains immutable;
+usage.json and run.json track the session. Gateway pricing/retention are unknown;
+reservation caps cannot guarantee exact billing for gateway-injected prompts.
+Closing the viewer closes its chat client and prevents new requests; client
+cancellation cannot prove when an upstream gateway stops billing.
 
 Plot export (optional; requires matplotlib):
   python examples/plot_equity_validation.py --validation data/market/research/validation-new

@@ -5,29 +5,53 @@ interface Message {
   content: string;
 }
 
+interface ChatConfig {
+  enabled: boolean;
+  reason?: string | null;
+  model?: string;
+  reasoning_effort?: string;
+  base_url?: string;
+  remaining_calls?: number;
+  controls?: { max_output_tokens: number };
+}
+
 export default function ChatPanel() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [config, setConfig] = useState<ChatConfig | null>(null);
+  const [consent, setConsent] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const refreshConfig = async () => {
+    try {
+      const response = await fetch("/api/chat-config");
+      if (!response.ok) throw new Error("Configuration unavailable");
+      setConfig(await response.json());
+    } catch {
+      setConfig({ enabled: false, reason: "Research chat configuration unavailable." });
+    }
+  };
+
+  useEffect(() => { void refreshConfig(); }, []);
+
   const sendMessage = async () => {
-    if (!input.trim() || loading) return;
+    if (!input.trim() || loading || !config?.enabled || !consent) return;
 
     const userMessage = input.trim();
     setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
+    setConsent(false);
     setLoading(true);
 
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: userMessage }),
+        body: JSON.stringify({ question: userMessage, consent_to_send: true }),
       });
 
       const data = await response.json();
@@ -39,6 +63,7 @@ export default function ChatPanel() {
       } else {
         setMessages((prev) => [
           ...prev,
+          { role: "user", content: userMessage },
           { role: "assistant", content: data.answer || "No response" },
         ]);
       }
@@ -49,6 +74,7 @@ export default function ChatPanel() {
       ]);
     } finally {
       setLoading(false);
+      await refreshConfig();
     }
   };
 
@@ -62,17 +88,24 @@ export default function ChatPanel() {
   return (
     <div className="chat-panel">
       <div className="chat-header">
-        <span>Ask about status</span>
+        <span>Public research questions</span>
+      </div>
+      <div className="chat-settings" role="status">
+        {config?.enabled ? (
+          <>
+            <div>{config.model} · {config.reasoning_effort} reasoning · {config.remaining_calls} calls remaining</div>
+            <div>Output cap: {config.controls?.max_output_tokens} tokens. Each question is independent.</div>
+          </>
+        ) : <div>{config?.reason || "Checking research chat configuration..."}</div>}
+        <div>Experiment data and results stay local. Use the status and board panels for run updates.</div>
       </div>
       <div className="chat-messages">
         {messages.length === 0 && (
           <div className="chat-empty">
-            Ask questions like:
+            Ask about general research methods:
             <ul>
-              <li>"What's happening?"</li>
-              <li>"Any errors?"</li>
-              <li>"What's the best model?"</li>
-              <li>"How many experiments done?"</li>
+              <li>"How does beta-neutral weighting work?"</li>
+              <li>"Why lag accounting information?"</li>
             </ul>
           </div>
         )}
@@ -88,16 +121,24 @@ export default function ChatPanel() {
         )}
         <div ref={messagesEndRef} />
       </div>
+      {config?.enabled && (
+        <label className="chat-consent">
+          <input type="checkbox" checked={consent} disabled={loading || !input.trim()}
+            onChange={(e) => setConsent(e.target.checked)} />
+          Send this public question to {config.base_url}
+        </label>
+      )}
       <div className="chat-input-area">
         <input
           type="text"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => { setInput(e.target.value); setConsent(false); }}
           onKeyDown={handleKeyDown}
-          placeholder="Ask about the system..."
-          disabled={loading}
+          placeholder="Ask a public research question..."
+          aria-label="Public research question"
+          disabled={loading || !config?.enabled}
         />
-        <button onClick={sendMessage} disabled={loading || !input.trim()}>
+        <button onClick={sendMessage} disabled={loading || !input.trim() || !config?.enabled || !consent}>
           Send
         </button>
       </div>

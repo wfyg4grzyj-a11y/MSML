@@ -53,12 +53,13 @@ class TestStartStopEndpoints:
         client = get_client()
         resp = client.post("/api/start")
         # The dashboard is a viewer; pipeline commands run through run.py.
-        assert resp.status_code == 404
+        # A built frontend's static mount rejects unsupported POSTs with 405.
+        assert resp.status_code in {404, 405}
 
     def test_stop(self, tmp_workspace: str) -> None:
         client = get_client()
         resp = client.post("/api/stop")
-        assert resp.status_code == 404
+        assert resp.status_code in {404, 405}
 
 
 class TestFilesEndpoint:
