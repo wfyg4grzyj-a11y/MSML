@@ -188,7 +188,9 @@ def run_main() -> None:
 
     # Create provider
     from alpha_lab.client import get_provider
-    provider = get_provider(provider_name, api_key=api_key)
+    provider = get_provider(provider_name, api_key=api_key,
+                            runtime_settings=config.llm_runtime,
+                            ledger=Path(workspace) / "llm-usage.json")
 
     # Phase 0: resolve or generate domain adapter
     from alpha_lab.phase0 import run_phase0

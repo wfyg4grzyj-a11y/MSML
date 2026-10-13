@@ -44,38 +44,18 @@ def _extract_verdict(content: str) -> str:
 
     Returns "PASS", "NEEDS FIXES", or "UNCLEAR".
     """
-    # Normalize whitespace
-    content = content.strip()
-
-    # Patterns to look for verdict (case-insensitive)
-    verdict_patterns = [
-        # "Final verdict: PASS" or "Final verdict: NEEDS FIXES"
-        r'final\s+verdict[:\s*]+\**(PASS|NEEDS\s*FIXES)\**',
-        # "Verdict: PASS" or "Verdict: NEEDS FIXES"
-        r'(?<!\w)verdict[:\s*]+\**(PASS|NEEDS\s*FIXES)\**',
-        # Markdown header "## Verdict" followed by verdict on same/next line
-        r'##\s*(?:final\s+)?verdict[:\s]*(PASS|NEEDS\s*FIXES)',
-        # Bold verdict "**PASS**" or "**NEEDS FIXES**" at end of document (last 500 chars)
-        r'\*\*(PASS|NEEDS\s*FIXES)\*\*',
-    ]
-
-    for pattern in verdict_patterns:
-        match = re.search(pattern, content, re.IGNORECASE)
-        if match:
-            verdict = match.group(1).upper()
-            if "NEEDS" in verdict:
-                return "NEEDS FIXES"
-            return "PASS"
-
-    # Fallback: look in the last 500 characters for unstructured verdict
-    # (more likely to be the actual conclusion, not instruction examples)
-    tail = content[-500:].upper()
-    if "NEEDS FIXES" in tail and "PASS" not in tail.split("NEEDS FIXES")[-1]:
-        return "NEEDS FIXES"
-    if "VERDICT" in tail and "PASS" in tail:
-        return "PASS"
-
-    return "UNCLEAR"
+    # Ignore fenced examples and prose mentions. Honor the last actual verdict,
+    # including standalone Markdown headings and bold/ordinary verdict lines.
+    content = re.sub(r'```[^\n]*\n.*?```', '', content, flags=re.DOTALL)
+    pattern = (
+        r'^\s*(?:#{1,6}\s*)?(?:\*\*)?'
+        r'(?:(?:final\s+)?verdict(?:\*\*)?\s*[:\s]+(?:\*\*)?)?'
+        r'(PASS|NEEDS\s+FIXES)(?:\*\*)?\s*[.!]?\s*$'
+    )
+    matches = list(re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE))
+    if not matches:
+        return "UNCLEAR"
+    return "NEEDS FIXES" if "NEEDS" in matches[-1].group(1).upper() else "PASS"
 
 
 # ---------------------------------------------------------------------------

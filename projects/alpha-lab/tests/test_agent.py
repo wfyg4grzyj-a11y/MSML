@@ -228,8 +228,8 @@ class TestAgentNudgeLimit:
         agent._call_api = MagicMock(side_effect=[mock_response, None])
         agent.send_user_message("test")
 
-        # After the nudge limit, the agent should be done
-        assert agent._done is True
+        # A stalled agent stops, but must not claim a successfully completed run.
+        assert agent._done is False
         error_events = [e for e in events if isinstance(e, ErrorEvent)]
         assert any("stuck" in e.message.lower() for e in error_events)
 

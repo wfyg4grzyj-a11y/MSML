@@ -123,6 +123,7 @@ class ContextManager:
     # Track API-reported usage for calibration
     last_input_tokens: int = 0
     last_output_tokens: int = 0
+    last_summarization_succeeded: bool = False
 
     def add_entry(self, role: str, content: str) -> None:
         """Track a conversation turn locally."""
@@ -144,6 +145,7 @@ class ContextManager:
 
         Returns the summary that was generated.
         """
+        self.last_summarization_succeeded = False
         # Take the older ~60% of entries for summarization
         split_point = int(len(self.entries) * 0.6)
         if split_point < 2:
@@ -164,7 +166,7 @@ class ContextManager:
         summarization_ok = False
         agent_desc = self.domain_description or "quant research"
         try:
-            self.summary = self.provider.complete(
+            candidate_summary = self.provider.complete(
                 model=self.model,
                 system=(
                     f"Summarize this conversation between a {agent_desc} "
@@ -176,7 +178,9 @@ class ContextManager:
                 messages=[{"role": "user", "content": text_to_summarize}],
                 max_tokens=4000,
             )
-            summarization_ok = True
+            if isinstance(candidate_summary, str) and candidate_summary.strip():
+                self.summary = candidate_summary
+                summarization_ok = True
         except Exception as e:
             import logging as _logging
             _logging.getLogger("alpha_lab.context").warning(
@@ -184,6 +188,7 @@ class ContextManager:
             )
 
         if summarization_ok:
+            self.last_summarization_succeeded = True
             # Only discard old entries if we successfully generated a summary
             self.entries = kept_entries
             self.cumulative_tokens = sum(e.token_count for e in kept_entries)
