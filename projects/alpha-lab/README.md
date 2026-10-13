@@ -538,6 +538,20 @@ Requires ANTHROPIC_API_KEY in your `.env`.
 
 ## Running Your Own Experiments
 
+### Bounded US equity research on Windows
+
+The fork includes a dated Sharadar equity panel, a constrained market-neutral
+backtester, and an AlphaLab strategy-design loop. The LLM sees public factor
+definitions and generated strategy specifications; market data and backtest
+results stay local. Selection is frozen before holdout evaluation. See
+[US equity research instructions](docs/US_EQUITY_RESEARCH.txt) for setup,
+commands, controls, and the current research limitations.
+
+Standard `run.py` configs can opt into shared LLM controls through
+`llm_runtime`. This requires an explicit approved gateway model and medium or
+high reasoning, and applies the chosen effort and budget to pipeline agents
+and Responses-based summaries. Existing configs keep their current behavior.
+
 ### Use an agent to set up your config
 
 This codebase was largely built with AI coding agents, and while it aims to be plug-and-play, it may need some tweaking for your setup. We recommend using an AI coding agent:

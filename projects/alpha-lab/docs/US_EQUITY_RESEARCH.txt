@@ -1,0 +1,132 @@
+Bounded US equity market-neutral research
+
+Install the optional numerical dependencies with the active environment:
+  python -m pip install -e ".[equity-research]"
+The local Windows environment already has NumPy, pandas, DuckDB and CUDA PyTorch.
+Run these commands from projects/alpha-lab with that environment active.
+
+Prepare a new immutable local panel from the Sharadar snapshots:
+  python -m alpha_lab.equity_pilot prepare --output data/market/research/panel-new
+
+Generate strategies through AlphaLab's AgentLoop, then backtest them locally:
+  python -m alpha_lab.equity_pilot run --panel data/market/research/panel-new --workspace data/market/research/run-new --model gpt-5.6-sol --reasoning-effort medium
+Choose gpt-5.6-sol, gpt-6-sol or gpt-6.1-sol explicitly; medium or high reasoning
+is required. This command loads .env locally. Configure the PC's proxy through
+HTTPS_PROXY when necessary. Keys never belong in config files or prompts.
+
+Freeze the selection rule and evaluate the holdout:
+  python -m alpha_lab.equity_validation --panel data/market/research/panel-new --run data/market/research/run-new --output data/market/research/validation-new
+Multiple --run arguments compare prespecified candidate sets. Do not reuse a
+holdout to tune or select another strategy after looking at its results.
+
+The strategy designer has exactly three tools: research_rules, register_strategy
+and report_to_user. It has no backtester, data-store, shell, file reader, web search,
+user-question or delegation tool. Public factor definitions are its only data.
+Local evaluations start after the final LLM call and never return results to it.
+Specific authorization for licensed-data summaries at the configured gateway
+would be needed to develop a separate feedback-driven mode; this mode does not
+provide that data path.
+
+The panel uses monthly universes of the 500 largest qualifying primary domestic
+common stocks, including currently delisted names. Formation uses raw price >=$5,
+20-observation dollar volume >=$5m, and dated market cap >=$500m. It uses ART
+as-reported trailing financials, a two-calendar-day filing lag, and a maximum
+filing age of 550 days. DAILY market cap is converted from USD millions to USD.
+Signals use percentile ranks. Price momentum uses 21/63/252 observed stock-price
+rows; volatility and beta use the aligned SPY session calendar. Historical gaps
+can therefore extend the momentum calendar window. No current index membership
+is used. Static domestic security categories are not a dated security master.
+
+Portfolio construction projects scores off an intercept and trailing SPY beta.
+Gross exposure is at most 1; each name is capped at 2% by reducing overall gross.
+Signals formed at month-end are executed at the following session close, with
+returns beginning in the subsequent interval. Targets are maintained daily, so
+turnover includes changes caused by portfolio drift. Orders for unavailable names
+are removed using information from the execution close. Newly missing prices are
+marked stale and trigger a neutral portfolio repair for the following interval.
+The missing exposure and nearby corporate actions remain available for audit.
+The base calculation does not assume an unverified terminal payout. An adverse
+30% exposure charge on both long and short missing prices is a separate stress.
+
+Base frictions are 10 bps of one-way traded notional and 3% annual short borrow
+(252-session convention). Cash interest and financing spreads are omitted; the
+reported Sharpe uses zero risk-free return. The report therefore measures the
+long/short strategy component, not an interest-bearing collateral account.
+SPY adjusted close is the S&P 500 total-return proxy used for estimated and
+realized beta, not an official index series. Backtests are simulated, with no
+brokerage or trade execution path.
+
+Train: 2014-2019. Validation: 2020-2022. Holdout: 2023-2025. Selection maximizes
+the minimum train/validation net Sharpe among candidates meeting neutrality
+checks. It is written to selection-frozen.json before any holdout computation.
+Sources, panel hashes, candidate hashes, implementation hash and a frozen
+backtester copy support replay. All trials and failures should be retained.
+
+Run controls are saved before the first request: output cap 4096 (including
+reasoning), 16 calls, 500,000 conservatively reserved tokens, 90-minute run cap,
+240-second request deadline, 120-second read timeout, one concurrent LLM call,
+no SDK or agent retries on terminal runtime errors, no automatic truncation,
+strict function schemas, low text verbosity, store=false, and intentionally
+omitted temperature/top_p. Gateway pricing and retention are unknown. Token
+reservations include UTF-8 input bytes plus an 8192-token gateway allowance;
+unknown gateway-injected prompts prevent an exact advance billing guarantee.
+Reported usage also stops further requests when it exceeds the reservation cap.
+Failed calls retain their reservation. Partial/failed/incomplete streams cannot
+complete an agent successfully. Local bootstrap seeds do not make LLM sampling
+deterministic. Future runs still require intentional parameter choices.
+
+Shared controls for the general pipeline can be enabled in a run.py JSON config:
+  "model": "gpt-6-sol",
+  "reasoning_effort": "high",
+  "llm_runtime": {
+    "max_output_tokens": 4096,
+    "max_calls": 16,
+    "max_reserved_tokens": 500000,
+    "max_run_seconds": 5400,
+    "max_request_seconds": 240,
+    "read_timeout_seconds": 120,
+    "max_context_bytes": 64000,
+    "verbosity": "low"
+  }
+This is an example selection, not a permanent default. The shared provider
+enforces it across phase agents and summaries; legacy direct-client web proxies
+are disabled in bounded mode. The general pipeline's file/shell tools remain
+broader than this restricted equity designer, so its data flow needs separate
+review before a private-data campaign. Interactive dashboard chat is separate
+from a run.py campaign and does not inherit that campaign's ledger.
+
+Device verification (optional; requires CUDA PyTorch):
+  python examples/verify_equity_devices.py --panel data/market/research/panel-new --selection data/market/research/validation-new/selection-frozen.json --workspace data/market/research/devices-new
+This uses AlphaLab's native Windows CPU/GPU subprocess managers to project real
+monthly factors and compare NumPy with CPU/CUDA float64 results. Small cross-
+sections typically run faster on CPU; neural experiments can use the GPU.
+
+Export the generated strategies as ordinary AlphaLab experiments:
+  python -m alpha_lab.equity_experiment --panel data/market/research/panel-new --run data/market/research/run-new --workspace data/market/research/experiments-new
+Each experiment contains strategy.py, strategy.json, run_experiment.py,
+config.yaml and experiment.json. Its board entry is marked checked, ready for
+the native CPU executor. Running run_experiment.py writes results/metrics.json
+with a primary Sharpe from validation only, plus the dated daily return series.
+The worker entry point rejects holdout access. The export uses fixed, validated
+templates; model-generated titles and JSON specifications are never executed
+as code or used as directory paths. The dashboard can inspect this workspace's
+experiment database and leaderboard.
+
+Plot export (optional; requires matplotlib):
+  python examples/plot_equity_validation.py --validation data/market/research/validation-new
+
+Material research limitations: corrected vendor history is not a historical
+feed replay; the static security classification and ticker/issuer mappings are
+not fully point-in-time audited; terminal actions are not reconciled into all
+returns; historical short availability and locate costs are absent. Estimated
+formation beta neutrality does not guarantee realized neutrality. The saved
+panel explicitly keeps point_in_time_attested and terminal_actions_reconciled
+false. A favorable backtest would not resolve those limitations.
+
+Primary methodology references:
+  https://sharadar.com/docs/fundamentals
+  https://sharadar.com/docs/daily
+  https://sharadar.com/docs/stocks
+  https://sharadar.com/docs/actions
+  https://developers.openai.com/api/docs/guides/reasoning
+  https://developers.openai.com/api/docs/guides/function-calling

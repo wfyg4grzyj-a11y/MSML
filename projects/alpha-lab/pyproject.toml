@@ -31,9 +31,11 @@ alpha-lab-serve = "alpha_lab.server:serve_main"
 alpha-lab-data = "alpha_lab.market_data.pipeline:main"
 alpha-lab-tiingo = "alpha_lab.market_data.cli:main"
 alpha-lab-sharadar = "alpha_lab.market_data.sharadar_cli:main"
+alpha-lab-equity = "alpha_lab.equity_pilot:main"
 
 [project.optional-dependencies]
 risk-data = ["exchange-calendars>=4.11,<5"]
+equity-research = ["numpy>=1.26,<3", "pandas>=2.2,<4"]
 
 [build-system]
 requires = ["hatchling"]
