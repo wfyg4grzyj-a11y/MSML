@@ -138,9 +138,10 @@ class TestDispatcherSubmitChecked:
         dispatcher._submit_checked()
 
         exp = db.get(exp_id)
-        assert exp.status == "finished"  # moved to finished (with error)
+        assert exp.status == "queued"  # Outcome may be ambiguous; no automatic retry.
         assert exp.error is not None
         assert "Submit failed" in exp.error
+        assert "reconcile before retry" in exp.error
 
 
 class TestDispatcherPollSlurm:

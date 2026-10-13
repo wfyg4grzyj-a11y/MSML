@@ -51,6 +51,7 @@ class Worker:
         self._thread: threading.Thread | None = None
         self._agent: AgentLoop | None = None
         self._stop_requested = False
+        self._task_lock = threading.Lock()
 
     def _tracked_event_callback(self, event: AgentEvent) -> None:
         """Wrap event_callback to update last_event_at for watchdog."""
@@ -65,64 +66,72 @@ class Worker:
     def current_experiment(self) -> Experiment | None:
         return self._current_experiment
 
-    def implement(self, experiment: Experiment) -> None:
+    def _start_experiment(self, experiment: Experiment, task: str) -> bool:
+        """Claim work before creating a thread; stale snapshots are harmless."""
+        with self._task_lock:
+            if self._stop_requested:
+                return False
+            if self.busy:
+                raise RuntimeError(f"Worker {self.worker_id} is busy")
+            claimed = self.db.claim_worker(experiment, self.worker_id, task)
+            if claimed is None:
+                return False
+            self._current_experiment = claimed
+            self.last_event_at = time.time()
+            try:
+                self._thread = threading.Thread(
+                    target=getattr(self, f"_run_{task}"), args=(claimed,), daemon=True,
+                )
+                self._thread.start()
+            except BaseException:
+                self._thread = None
+                self._current_experiment = None
+                self.db.release_worker(experiment.id, worker_id=self.worker_id)
+                raise
+            return True
+
+    def implement(self, experiment: Experiment) -> bool:
         """Start implementing an experiment in a background thread."""
-        if self.busy:
-            raise RuntimeError(f"Worker {self.worker_id} is busy")
-        self._current_experiment = experiment
-        self.last_event_at = time.time()
-        self.db.assign_worker(experiment.id, self.worker_id)
-        self._thread = threading.Thread(
-            target=self._run_implement,
-            args=(experiment,),
-            daemon=True,
-        )
-        self._thread.start()
+        return self._start_experiment(experiment, "implement")
 
-    def analyze(self, experiment: Experiment) -> None:
+    def analyze(self, experiment: Experiment) -> bool:
         """Start analyzing an experiment in a background thread."""
-        if self.busy:
-            raise RuntimeError(f"Worker {self.worker_id} is busy")
-        self._current_experiment = experiment
-        self.last_event_at = time.time()
-        self.db.assign_worker(experiment.id, self.worker_id)
-        self._thread = threading.Thread(
-            target=self._run_analyze,
-            args=(experiment,),
-            daemon=True,
-        )
-        self._thread.start()
+        return self._start_experiment(experiment, "analyze")
 
-    def generate_report(self, milestone_number: int, done_count: int) -> None:
+    def generate_report(self, milestone_number: int, done_count: int) -> bool:
         """Start generating a milestone report in a background thread."""
-        if self.busy:
-            raise RuntimeError(f"Worker {self.worker_id} is busy")
-        self.last_event_at = time.time()
-        self._thread = threading.Thread(
-            target=self._run_report,
-            args=(milestone_number, done_count),
-            daemon=True,
-        )
-        self._thread.start()
+        with self._task_lock:
+            if self._stop_requested:
+                return False
+            if self.busy:
+                raise RuntimeError(f"Worker {self.worker_id} is busy")
+            self._current_experiment = None
+            self.last_event_at = time.time()
+            self._thread = threading.Thread(
+                target=self._run_report, args=(milestone_number, done_count), daemon=True,
+            )
+            self._thread.start()
+            return True
 
-    def fix(self, experiment: Experiment) -> None:
+    def fix(self, experiment: Experiment) -> bool:
         """Start fixing a failed experiment in a background thread."""
-        if self.busy:
-            raise RuntimeError(f"Worker {self.worker_id} is busy")
-        self._current_experiment = experiment
-        self.last_event_at = time.time()
-        self.db.assign_worker(experiment.id, self.worker_id)
-        self._thread = threading.Thread(
-            target=self._run_fix,
-            args=(experiment,),
-            daemon=True,
-        )
-        self._thread.start()
+        return self._start_experiment(experiment, "fix")
 
     def stop(self) -> None:
-        self._stop_requested = True
-        if self._agent is not None:
-            self._agent.stop()
+        with self._task_lock:
+            self._stop_requested = True
+            agent = self._agent
+        if agent is not None:
+            agent.stop()
+
+    def _activate_agent(self, agent: AgentLoop) -> bool:
+        """Handle stop requests received while the worker is preparing an agent."""
+        with self._task_lock:
+            if self._stop_requested:
+                agent.stop()
+                return False
+            self._agent = agent
+            return True
 
     def _build_experiment_context(self, experiment: Experiment) -> str:
         """Build extra context describing the experiment."""
@@ -185,7 +194,8 @@ class Worker:
                 adapter=self.adapter,
             )
 
-            self._agent = agent
+            if not self._activate_agent(agent):
+                return
             agent.run(
                 f"Implement experiment #{experiment.id} '{experiment.name}'. "
                 f"Read the experiment details above. Go."
@@ -199,11 +209,12 @@ class Worker:
             self._current_experiment = None
             # Auto-transition: if LLM didn't update status, do it based on filesystem
             try:
-                self._ensure_implement_status(experiment)
+                if not self._stop_requested:
+                    self._ensure_implement_status(experiment)
             except Exception as e:
                 logger.error(f"_ensure_implement_status failed: {e}")
             try:
-                self.db.release_worker(experiment.id)
+                self.db.release_worker(experiment.id, worker_id=self.worker_id)
             except Exception as e:
                 logger.error(f"release_worker failed: {e}")
 
@@ -296,7 +307,8 @@ class Worker:
                 adapter=self.adapter,
             )
 
-            self._agent = agent
+            if not self._activate_agent(agent):
+                return
             agent.run(
                 f"Analyze experiment #{experiment.id} '{experiment.name}'. "
                 f"Read the experiment details above. Go."
@@ -310,11 +322,12 @@ class Worker:
             self._current_experiment = None
             # Auto-transition: if LLM didn't update status, do it
             try:
-                self._ensure_analyze_status(experiment)
+                if not self._stop_requested:
+                    self._ensure_analyze_status(experiment)
             except Exception as e:
                 logger.error(f"_ensure_analyze_status failed: {e}")
             try:
-                self.db.release_worker(experiment.id)
+                self.db.release_worker(experiment.id, worker_id=self.worker_id)
             except Exception as e:
                 logger.error(f"release_worker failed: {e}")
 
@@ -401,7 +414,8 @@ class Worker:
                 adapter=self.adapter,
             )
 
-            self._agent = agent
+            if not self._activate_agent(agent):
+                return
             agent.run(
                 f"Fix failed experiment #{experiment.id} '{experiment.name}'. "
                 f"Error: {experiment.error}. Read the logs and fix it."
@@ -414,7 +428,7 @@ class Worker:
             self._agent = None
             self._current_experiment = None
             try:
-                self.db.release_worker(experiment.id)
+                self.db.release_worker(experiment.id, worker_id=self.worker_id)
             except Exception as e:
                 logger.error(f"release_worker failed: {e}")
 
@@ -502,7 +516,7 @@ class Worker:
                 model=self.config.model,
                 context=context,
                 event_callback=self._tracked_event_callback,
-                reasoning_effort="medium",
+                reasoning_effort=self.config.reasoning_effort,
                 config=self.config,
                 tools=tools,
                 prompt_builder=prompt_builder,
@@ -513,7 +527,8 @@ class Worker:
                 adapter=self.adapter,
             )
 
-            self._agent = agent
+            if not self._activate_agent(agent):
+                return
             agent.run(
                 f"Generate milestone report #{milestone_number}. "
                 f"{done_count} experiments completed so far. "

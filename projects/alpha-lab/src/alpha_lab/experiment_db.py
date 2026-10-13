@@ -113,6 +113,8 @@ class ExperimentDB:
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute(_CREATE_TABLE)
+                if "fix_attempts" not in {row["name"] for row in conn.execute("PRAGMA table_info(experiments)")}:
+                    conn.execute("ALTER TABLE experiments ADD COLUMN fix_attempts INTEGER NOT NULL DEFAULT 0")
                 conn.commit()
             finally:
                 conn.close()
@@ -176,45 +178,153 @@ class ExperimentDB:
             finally:
                 conn.close()
 
-    def assign_worker(self, exp_id: int, worker_id: str) -> None:
+    def assign_worker(self, exp_id: int, worker_id: str) -> bool:
+        """Claim eligible unassigned work; never replace another owner."""
         now = time.time()
         with self._lock:
             conn = self._connect()
             try:
-                conn.execute(
-                    "UPDATE experiments SET worker_id = ?, updated_at = ? WHERE id = ?",
-                    (worker_id, now, exp_id),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-
-    def cancel_if_idle(self, exp_id: int) -> bool:
-        """Atomically prune unassigned work without overwriting an active claim."""
-        with self._lock:
-            conn = self._connect()
-            try:
                 changed = conn.execute(
-                    "UPDATE experiments SET status = 'cancelled', updated_at = ? "
-                    "WHERE id = ? AND worker_id IS NULL "
-                    "AND status IN ('to_implement', 'implemented', 'checked', 'finished')",
-                    (time.time(), exp_id),
+                    "UPDATE experiments SET worker_id = ?, updated_at = ? WHERE id = ? "
+                    "AND worker_id IS NULL "
+                    "AND status IN ('to_implement', 'implemented', 'finished')",
+                    (worker_id, now, exp_id),
                 ).rowcount
                 conn.commit()
                 return changed == 1
             finally:
                 conn.close()
 
-    def release_worker(self, exp_id: int) -> None:
-        now = time.time()
+    def claim_worker(self, snapshot: Experiment, worker_id: str, task: str) -> Experiment | None:
+        """Claim a current snapshot and count fixer attempts in the same write."""
+        eligible = {
+            "implement": ("to_implement", "implemented"),
+            "analyze": ("finished",),
+            "fix": ("finished",),
+        }
+        if task not in eligible:
+            raise ValueError(f"Unknown worker task: {task}")
+        if snapshot.status not in eligible[task] or snapshot.worker_id is not None:
+            return None
+        fix_set = ", fix_attempts = fix_attempts + 1" if task == "fix" else ""
+        fix_where = (
+            " AND error IS NOT NULL AND error != '' "
+            "AND (results_json IS NULL OR results_json = '') AND fix_attempts < 2"
+            if task == "fix" else ""
+        )
         with self._lock:
             conn = self._connect()
             try:
-                conn.execute(
-                    "UPDATE experiments SET worker_id = NULL, updated_at = ? WHERE id = ?",
-                    (now, exp_id),
-                )
+                changed = conn.execute(
+                    f"UPDATE experiments SET worker_id = ?, updated_at = ?{fix_set} "
+                    f"WHERE id = ? AND status = ? AND updated_at = ? "
+                    f"AND worker_id IS NULL{fix_where}",
+                    (worker_id, time.time(), snapshot.id, snapshot.status, snapshot.updated_at),
+                ).rowcount
+                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (snapshot.id,)).fetchone()
                 conn.commit()
+                return _row_to_experiment(row) if changed == 1 else None
+            finally:
+                conn.close()
+
+    def reserve_submission(self, snapshot: Experiment) -> Experiment | None:
+        """Reserve checked work before invoking an executor with side effects."""
+        if snapshot.status != "checked" or snapshot.worker_id is not None:
+            return None
+        with self._lock:
+            conn = self._connect()
+            try:
+                changed = conn.execute(
+                    "UPDATE experiments SET status = 'queued', slurm_job_id = NULL, "
+                    "started_at = NULL, finished_at = NULL, updated_at = ?, "
+                    "error = 'Submission reserved; job identity pending. Reconcile before retry.' "
+                    "WHERE id = ? AND status = 'checked' AND worker_id IS NULL AND updated_at = ?",
+                    (time.time(), snapshot.id, snapshot.updated_at),
+                ).rowcount
+                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (snapshot.id,)).fetchone()
+                conn.commit()
+                return _row_to_experiment(row) if changed == 1 else None
+            finally:
+                conn.close()
+
+    def attach_submission(self, reservation: Experiment, job_id: str) -> bool:
+        """Attach a returned job ID only to its unchanged reservation."""
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise ValueError("Executor returned an empty job identity")
+        with self._lock:
+            conn = self._connect()
+            try:
+                changed = conn.execute(
+                    "UPDATE experiments SET slurm_job_id = ?, error = NULL, updated_at = ? "
+                    "WHERE id = ? AND status = 'queued' AND worker_id IS NULL "
+                    "AND slurm_job_id IS NULL AND updated_at = ?",
+                    (job_id, time.time(), reservation.id, reservation.updated_at),
+                ).rowcount
+                conn.commit()
+                return changed == 1
+            finally:
+                conn.close()
+
+    def flag_submission(self, reservation: Experiment, message: str) -> bool:
+        """Keep an ambiguous reservation queued; do not enable automatic retry."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                changed = conn.execute(
+                    "UPDATE experiments SET error = ?, updated_at = ? WHERE id = ? "
+                    "AND status = 'queued' AND worker_id IS NULL AND slurm_job_id IS NULL "
+                    "AND updated_at = ?",
+                    (message, time.time(), reservation.id, reservation.updated_at),
+                ).rowcount
+                conn.commit()
+                return changed == 1
+            finally:
+                conn.close()
+
+    def cancel_if_idle(self, exp_id: int, *, expected_status: str | None = None) -> bool:
+        """Atomically prune unassigned work without overwriting an active claim."""
+        if expected_status is not None and expected_status not in (
+            "to_implement", "implemented", "checked", "finished"
+        ):
+            raise ValueError("Cancellation requires an idle status")
+        extra = " AND status = ?" if expected_status is not None else ""
+        values = (time.time(), exp_id) + ((expected_status,) if expected_status is not None else ())
+        with self._lock:
+            conn = self._connect()
+            try:
+                changed = conn.execute(
+                    "UPDATE experiments SET status = 'cancelled', updated_at = ? "
+                    "WHERE id = ? AND worker_id IS NULL "
+                    "AND status IN ('to_implement', 'implemented', 'checked', 'finished')" + extra,
+                    values,
+                ).rowcount
+                conn.commit()
+                return changed == 1
+            finally:
+                conn.close()
+
+    def release_worker(
+        self, exp_id: int, *, worker_id: str | None = None, updated_at: float | None = None
+    ) -> bool:
+        """Release a claim, optionally requiring its owner and observed revision."""
+        now = time.time()
+        where = ""
+        values: list[object] = [now, exp_id]
+        if worker_id is not None:
+            where += " AND worker_id = ?"
+            values.append(worker_id)
+        if updated_at is not None:
+            where += " AND updated_at = ?"
+            values.append(updated_at)
+        with self._lock:
+            conn = self._connect()
+            try:
+                changed = conn.execute(
+                    "UPDATE experiments SET worker_id = NULL, updated_at = ? WHERE id = ?" + where,
+                    values,
+                ).rowcount
+                conn.commit()
+                return changed == 1
             finally:
                 conn.close()
 
@@ -254,6 +364,20 @@ class ExperimentDB:
                     (error_msg, now, exp_id),
                 )
                 conn.commit()
+            finally:
+                conn.close()
+
+    def clear_matching_error(self, exp_id: int, expected_error: str) -> bool:
+        """Clear a resolved diagnostic without removing a different failure."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                changed = conn.execute(
+                    "UPDATE experiments SET error = NULL, updated_at = ? WHERE id = ? AND error = ?",
+                    (time.time(), exp_id, expected_error),
+                ).rowcount
+                conn.commit()
+                return changed == 1
             finally:
                 conn.close()
 

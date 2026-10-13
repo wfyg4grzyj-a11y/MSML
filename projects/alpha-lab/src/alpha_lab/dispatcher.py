@@ -78,6 +78,7 @@ class CPUExecutor(Protocol):
 logger = logging.getLogger("alpha_lab.dispatcher")
 
 POLL_INTERVAL = 10  # seconds
+_UNKNOWN_JOB_ERROR = "Job state UNKNOWN; reconcile its process/job identity before retry."
 
 
 class Dispatcher:
@@ -237,15 +238,14 @@ class Dispatcher:
         self._cleanup()
 
     def _cleanup(self) -> None:
-        """Release all remaining worker assignments and close log file."""
-        for status in ("to_implement", "implemented", "finished"):
-            try:
-                assigned = self.db.list_by_status(status)
-                for exp in assigned:
-                    if exp.worker_id is not None:
-                        self.db.release_worker(exp.id)
-            except Exception as e:
-                logger.warning("Failed to release workers for status '%s' during cleanup: %s", status, e)
+        """Release this dispatcher's idle claims, retaining claims of live threads."""
+        idle_ids = {w.worker_id for w in self.workers if not w.busy}
+        try:
+            for exp in self.db.list_all():
+                if exp.worker_id in idle_ids:
+                    self.db.release_worker(exp.id, worker_id=exp.worker_id, updated_at=exp.updated_at)
+        except Exception as e:
+            logger.warning("Failed to release idle worker claims during cleanup: %s", e)
 
         if self._log_file is not None:
             try:
@@ -259,52 +259,37 @@ class Dispatcher:
 
         Returns a summary dict of recovery actions taken.
         """
-        summary: dict = {"released_workers": 0, "slurm_reconciled": 0}
+        if any(worker.busy for worker in self.workers):
+            raise RuntimeError("Recovery is only valid before workers start")
+        summary: dict = {"released_workers": 0, "slurm_reconciled": 0, "unresolved_submissions": 0}
 
         # 1. Release orphaned worker assignments (no workers exist yet at startup)
-        for status in ("to_implement", "implemented", "finished"):
-            assigned = self.db.list_by_status(status)
-            for exp in assigned:
-                if exp.worker_id is not None:
-                    logger.info(
-                        f"Recovery: releasing orphaned worker {exp.worker_id} "
-                        f"from experiment #{exp.id} {exp.name}"
-                    )
-                    self.db.release_worker(exp.id)
+        for exp in self.db.list_all():
+            if exp.worker_id is not None:
+                if self.db.release_worker(exp.id, worker_id=exp.worker_id, updated_at=exp.updated_at):
                     summary["released_workers"] += 1
 
         # 2. Reconcile SLURM jobs
         slurm_exps = self.db.list_by_status("queued", "running")
-        job_ids = [exp.slurm_job_id for exp in slurm_exps if exp.slurm_job_id]
-        if job_ids and self.executor is not None:
-            statuses = self.executor.poll_jobs(job_ids)
-            for exp in slurm_exps:
-                if not exp.slurm_job_id or exp.slurm_job_id not in statuses:
-                    continue
-                slurm_status = statuses[exp.slurm_job_id]
-
-                if slurm_status == "RUNNING" and exp.status == "queued":
-                    self.db.update_status(exp.id, "running", started_at=time.time())
-                    logger.info(f"Recovery: #{exp.id} queued -> running (SLURM RUNNING)")
-                    summary["slurm_reconciled"] += 1
-
-                elif slurm_status == "COMPLETED":
-                    self.db.update_status(exp.id, "finished", finished_at=time.time())
-                    logger.info(f"Recovery: #{exp.id} {exp.status} -> finished (SLURM COMPLETED)")
-                    summary["slurm_reconciled"] += 1
-
-                elif slurm_status in ("FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY"):
-                    self.db.set_error_and_finish(exp.id, f"SLURM {slurm_status}")
-                    logger.info(f"Recovery: #{exp.id} {exp.status} -> finished (SLURM {slurm_status})")
-                    summary["slurm_reconciled"] += 1
-
-                elif slurm_status == "PENDING":
-                    pass  # Leave as queued
-
-                elif slurm_status == "UNKNOWN":
-                    self.db.set_error_and_finish(exp.id, "SLURM job lost")
-                    logger.info(f"Recovery: #{exp.id} {exp.status} -> finished (SLURM job lost)")
-                    summary["slurm_reconciled"] += 1
+        for exp in slurm_exps:
+            if not exp.slurm_job_id:
+                summary["unresolved_submissions"] += 1
+                if exp.status == "queued" and not exp.error:
+                    self.db.flag_submission(exp, "Submission identity unavailable; reconcile before retry.")
+                self._log("unresolved_submission", experiment_id=exp.id)
+            elif exp.slurm_job_id.startswith("cpu-"):
+                self._cpu_job_ids.add(exp.slurm_job_id)
+        # Native GPU executors can reattach only identity-verified local processes.
+        recover_jobs = getattr(self.executor, "recover_running_jobs", None)
+        if callable(recover_jobs):
+            recover_jobs(self.workspace, {
+                exp.slurm_job_id: exp.name for exp in slurm_exps
+                if exp.slurm_job_id and exp.slurm_job_id not in self._cpu_job_ids
+            })
+        self._poll_slurm()
+        summary["slurm_reconciled"] = sum(
+            self.db.get(exp.id).status != exp.status for exp in slurm_exps
+        )
 
         self._log("recovery", **summary)
         logger.info(f"Recovery complete: {summary}")
@@ -601,8 +586,8 @@ Return ONLY the JSON array. No explanation."""
             return
 
         # Split into CPU and GPU jobs
-        cpu_job_ids = [jid for jid in job_ids if jid in self._cpu_job_ids]
-        gpu_job_ids = [jid for jid in job_ids if jid not in self._cpu_job_ids]
+        cpu_job_ids = [jid for jid in job_ids if jid in self._cpu_job_ids or jid.startswith("cpu-")]
+        gpu_job_ids = [jid for jid in job_ids if jid not in cpu_job_ids]
 
         # Poll both executors
         statuses: dict[str, str] = {}
@@ -610,12 +595,16 @@ Return ONLY the JSON array. No explanation."""
             statuses.update(self.executor.poll_jobs(gpu_job_ids))
         if cpu_job_ids and self.cpu_executor:
             statuses.update(self.cpu_executor.poll_jobs(cpu_job_ids))
+        for job_id in job_ids:
+            statuses.setdefault(job_id, "UNKNOWN")
 
         for exp in active:
             if not exp.slurm_job_id or exp.slurm_job_id not in statuses:
                 continue
 
             slurm_status = statuses[exp.slurm_job_id]
+            if slurm_status in ("PENDING", "RUNNING", "COMPLETED") and exp.error == _UNKNOWN_JOB_ERROR:
+                self.db.clear_matching_error(exp.id, _UNKNOWN_JOB_ERROR)
 
             if exp.status == "queued" and slurm_status == "RUNNING":
                 self.db.update_status(
@@ -648,7 +637,7 @@ Return ONLY the JSON array. No explanation."""
                 logger.info(f"Experiment #{exp.id} {exp.name}: {exp.status} -> finished")
 
             elif exp.status in ("queued", "running") and slurm_status in (
-                "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "UNKNOWN"
+                "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY"
             ):
                 self.db.set_error_and_finish(exp.id, f"SLURM {slurm_status}")
                 self.emit(ExperimentEvent(
@@ -662,6 +651,11 @@ Return ONLY the JSON array. No explanation."""
                 logger.warning(
                     f"Experiment #{exp.id} {exp.name}: SLURM {slurm_status}"
                 )
+            elif slurm_status == "UNKNOWN":
+                message = _UNKNOWN_JOB_ERROR
+                if exp.error != message:
+                    self.db.set_error(exp.id, message)
+                    self._log("unresolved_job", experiment_id=exp.id, job_id=exp.slurm_job_id)
 
     def _is_cpu_experiment(self, exp: Experiment) -> bool:
         """Check if an experiment should run on CPU based on its config."""
@@ -717,29 +711,46 @@ Return ONLY the JSON array. No explanation."""
                 logger.warning(f"No executor available for {exp.name}, skipping")
                 continue
 
+            if self._stop_requested:
+                break
+            reservation = self.db.reserve_submission(exp)
+            if reservation is None:
+                continue  # Snapshot was pruned, changed, or claimed after listing.
+            job_id = None
             try:
-                job_id = executor.submit_experiment(exp, self.workspace)
+                job_id = executor.submit_experiment(reservation, self.workspace)
+                self._log("submission_returned", experiment_id=exp.id, job_id=job_id)
+                if not self.db.attach_submission(reservation, job_id):
+                    raise RuntimeError("Submission reservation changed before job attachment")
                 if use_cpu:
                     self._cpu_job_ids.add(job_id)
-                self.db.set_slurm_job(exp.id, job_id)
-                self.db.update_status(exp.id, "queued")
-                self.emit(ExperimentEvent(
-                    experiment_id=exp.id,
-                    name=exp.name,
-                    status="queued",
-                    prev_status="checked",
-                    slurm_job_id=job_id,
-                    detail=f"Submitted {executor_name} job {job_id}",
-                ))
-                logger.info(f"Experiment #{exp.id} {exp.name}: submitted as {executor_name} job {job_id}")
             except Exception as e:
-                logger.error(f"Failed to submit experiment #{exp.id}: {e}")
-                self.db.set_error_and_finish(exp.id, f"Submit failed: {e}")
+                logger.error("Submit failed for experiment #%s (%s)", exp.id, type(e).__name__)
+                if job_id:
+                    try:
+                        executor.cancel(job_id)
+                        self._log("submission_cancel_requested", experiment_id=exp.id, job_id=job_id)
+                    except Exception as cancel_error:
+                        self._log("submission_cancel_failed", experiment_id=exp.id, job_id=job_id,
+                                  error_type=type(cancel_error).__name__)
+                self.db.flag_submission(
+                    reservation, f"Submit failed ({type(e).__name__}); reconcile before retry."
+                )
+                continue
+            # Observer failures must not turn an already attached job into a failed submission.
+            self.emit(ExperimentEvent(
+                experiment_id=exp.id, name=exp.name, status="queued", prev_status="checked",
+                slurm_job_id=job_id, detail=f"Submitted {executor_name} job {job_id}",
+            ))
+            logger.info(f"Experiment #{exp.id} {exp.name}: submitted as {executor_name} job {job_id}")
 
     def _assign_workers(self) -> None:
         """Assign idle workers to pending tasks. Priority: fix > analyze > implement."""
         # First: release experiments assigned to workers that are no longer busy
         self._release_dead_assignments()
+
+        if self._stop_requested:
+            return
 
         idle = [w for w in self.workers if not w.busy]
         if not idle:
@@ -757,11 +768,13 @@ Return ONLY the JSON array. No explanation."""
         ]
 
         for exp in fixable:
-            if not idle:
+            if not idle or self._stop_requested:
                 break
-            worker = idle.pop(0)
-            # Increment fix attempts before assigning
-            attempts = self.db.increment_fix_attempts(exp.id)
+            worker = idle[0]
+            if worker.fix(exp) is False:
+                continue
+            idle.pop(0)
+            attempts = self.db.get(exp.id).fix_attempts
             logger.info(
                 f"Assigning {worker.worker_id} to fix #{exp.id} {exp.name} "
                 f"(attempt {attempts}/{MAX_FIX_ATTEMPTS})"
@@ -769,7 +782,6 @@ Return ONLY the JSON array. No explanation."""
             self._log("assign_worker", worker=worker.worker_id, task="fix",
                        experiment_id=exp.id, experiment_name=exp.name,
                        fix_attempt=attempts)
-            worker.fix(exp)
 
         # Priority 2: analyze finished experiments (with results or max fix attempts reached)
         unassigned_finished = [
@@ -778,15 +790,17 @@ Return ONLY the JSON array. No explanation."""
         ]
 
         for exp in unassigned_finished:
-            if not idle:
+            if not idle or self._stop_requested:
                 break
-            worker = idle.pop(0)
+            worker = idle[0]
+            if worker.analyze(exp) is False:
+                continue
+            idle.pop(0)
             logger.info(
                 f"Assigning {worker.worker_id} to analyze #{exp.id} {exp.name}"
             )
             self._log("assign_worker", worker=worker.worker_id, task="analyze",
                        experiment_id=exp.id, experiment_name=exp.name)
-            worker.analyze(exp)
 
         # Priority 3: implement new experiments (include "implemented" stuck experiments)
         to_implement = self.db.list_by_status("to_implement", "implemented")
@@ -795,15 +809,17 @@ Return ONLY the JSON array. No explanation."""
         ]
 
         for exp in unassigned_impl:
-            if not idle:
+            if not idle or self._stop_requested:
                 break
-            worker = idle.pop(0)
+            worker = idle[0]
+            if worker.implement(exp) is False:
+                continue
+            idle.pop(0)
             logger.info(
                 f"Assigning {worker.worker_id} to implement #{exp.id} {exp.name}"
             )
             self._log("assign_worker", worker=worker.worker_id, task="implement",
                        experiment_id=exp.id, experiment_name=exp.name)
-            worker.implement(exp)
 
     def _release_dead_assignments(self) -> None:
         """Release experiments assigned to workers that are no longer busy.
@@ -835,7 +851,7 @@ Return ONLY the JSON array. No explanation."""
                     self._log("release_dead_assignment",
                               experiment_id=exp.id, worker=exp.worker_id,
                               status=exp.status)
-                    self.db.release_worker(exp.id)
+                    self.db.release_worker(exp.id, worker_id=exp.worker_id, updated_at=exp.updated_at)
 
     def _check_stale(self) -> None:
         """Detect stale workers (>5min) and release their assignments.
@@ -852,7 +868,7 @@ Return ONLY the JSON array. No explanation."""
             logger.warning(
                 f"Stale worker on experiment #{exp.id} {exp.name} — releasing"
             )
-            self.db.release_worker(exp.id)
+            self.db.release_worker(exp.id, worker_id=exp.worker_id, updated_at=exp.updated_at)
 
     def _check_stuck_workers(self) -> None:
         """Detect workers with no events for >10 minutes (observability only)."""
@@ -948,6 +964,8 @@ Return ONLY the JSON array. No explanation."""
 
     def _maybe_generate_report(self) -> None:
         """Trigger a milestone report if enough experiments are done."""
+        if self._stop_requested:
+            return
         if self._report_in_progress:
             if self._report_worker is not None:
                 if self._report_worker.busy:
@@ -994,7 +1012,9 @@ Return ONLY the JSON array. No explanation."""
             # Ensure reports directory exists
             Path(self.workspace, "reports").mkdir(parents=True, exist_ok=True)
 
-            worker.generate_report(self._report_number, done_count)
+            if worker.generate_report(self._report_number, done_count) is False:
+                self._report_number -= 1
+                return
             self._last_report_at_done_count = done_count
             self._report_in_progress = True
             self._report_worker = worker

@@ -201,6 +201,30 @@ evidence is retained when an idle row is pruned. Early compact board summaries m
 omit period labels; their detailed local results retain the explicit evaluation
 period. Avoid inferring a period from an unlabeled leaderboard number alone.
 
+Experiment workers claim a current, unassigned database row before starting a
+thread. Fixer attempts count only successful claims, with a limit of two claims;
+an attempt includes initialization failure after the claim. Checked experiments
+are reserved as queued before executor submission. Assigned checked work waits
+until its implementation worker releases the claim. Strategist pruning also
+requires unassigned to_implement work in an atomic database update.
+Only one research runner may own a workspace; startup recovery assumes the prior
+runner has stopped. A separate local viewer may inspect the same workspace.
+
+A queued reservation with no recorded job ID is an unresolved submission. An
+executor exception may occur after a process starts, so it remains queued with a
+diagnostic and is never automatically retried or sent to the fixer. UNKNOWN or
+unavailable executor states retain queued/running status for reconciliation.
+Check dispatcher.jsonl, local_job.json and the native process or scheduler state
+before explicitly resolving a row. If a job ID was returned but cannot be
+attached, the dispatcher logs it and requests cancellation; that request alone
+does not attest the job stopped. A later known job state clears only the matching
+UNKNOWN diagnostic. Native CPU IDs retain cpu- routing after restart; native GPU
+reattachment requires verified process identity. CPU process reattachment is not
+implemented, so a fresh CPU executor can leave prior jobs unresolved.
+Stopping workers blocks new tasks and prevents a preparing agent from starting.
+Shutdown keeps the claim of any worker thread still alive after the join timeout.
+Reporters use the configured reasoning effort, including high when chosen.
+
 External research-question chat is disabled unless --chat-config is provided.
 Copy examples/dashboard-chat.example.json to a local config and intentionally
 fill every null field: HTTPS endpoint, one approved model, medium/high reasoning, output/call/
