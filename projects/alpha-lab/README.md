@@ -105,6 +105,44 @@ pip install torch  # CPU only
 # pip install torch --index-url https://download.pytorch.org/whl/cu126  # CUDA 12.6
 ```
 
+### Native Windows
+
+Local CPU and GPU experiments run directly through Python on Windows. WSL
+and Git Bash are not required. Agent `shell_exec` commands use PowerShell;
+file search has a native Python implementation. Cancellation and timeouts
+terminate the entire experiment process tree using Windows Job Objects.
+POSIX hosts continue to use process groups, and SLURM remains Linux-specific.
+
+Install the dependencies in a Windows Python 3.11+ virtual environment and
+install a CUDA PyTorch wheel appropriate for your NVIDIA GPU. Keep the
+experiment interpreter configured with a Windows path (`ALPHALAB_PYTHON`
+or `pipeline.phase3.python_executable`). Linux virtual environments and
+Linux wheels cannot be used by a Windows interpreter.
+
+To verify local execution without API keys or LLM calls, run from the project
+directory in the activated environment:
+
+```powershell
+python examples/verify_local.py --workspace ./workspace/native_check --gpu 0
+```
+
+This trains a small CPU regression model and a small CUDA model and writes
+`workspace/native_check/verification.json` and individual experiment logs.
+Omit `--gpu 0` to check CPU execution only. Automated lifecycle tests, including
+child-process cancellation, timeouts and PID-safe GPU recovery, are available
+with `python -m pytest tests/test_local_experiments.py tests/test_local_process.py`.
+
+Before launching a paid campaign, load your API key into the process environment.
+The repository's `.env` file is not automatically loaded by `run.py`. For example:
+
+```powershell
+python -c "from dotenv import load_dotenv; load_dotenv(); from alpha_lab.run import run_main; run_main()" --config data/demo_exchange_single_gpu.json --workspace ./workspace_demo
+```
+
+Generated code must also use portable Python paths and process APIs. CUDA kernel
+compilation and Linux-only libraries may require additional domain-specific work;
+the local runner support does not make every research domain Windows-compatible.
+
 ### 2. Configure API keys
 
 ```bash

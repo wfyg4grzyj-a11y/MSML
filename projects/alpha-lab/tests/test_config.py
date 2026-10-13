@@ -22,16 +22,17 @@ class TestTaskConfig:
         assert config.model == "gpt-5.2"
         assert config.pipeline.phases == ["phase1"]
 
-    def test_resolve_data_path_absolute(self) -> None:
-        config = TaskConfig(data_path="/abs/path/data.csv", description="D")
-        resolved = config.resolve_data_path("/base")
-        assert resolved == "/abs/path/data.csv"
+    def test_resolve_data_path_absolute(self, tmp_path: Path) -> None:
+        path = tmp_path / "absolute data" / "data.csv"
+        config = TaskConfig(data_path=str(path), description="D")
+        resolved = config.resolve_data_path(str(tmp_path / "base"))
+        assert Path(resolved) == path
 
-    def test_resolve_data_path_relative(self) -> None:
+    def test_resolve_data_path_relative(self, tmp_path: Path) -> None:
         config = TaskConfig(data_path="data/file.csv", description="D")
-        resolved = config.resolve_data_path("/base")
-        assert "data/file.csv" in resolved
-        assert resolved.startswith("/")
+        resolved = config.resolve_data_path(str(tmp_path))
+        assert Path(resolved) == tmp_path / "data" / "file.csv"
+        assert Path(resolved).is_absolute()
 
 
 class TestLoadConfig:

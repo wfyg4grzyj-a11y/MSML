@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -18,30 +17,20 @@ from pathlib import Path
 from typing import TextIO
 
 from alpha_lab.experiment_db import Experiment
+from alpha_lab.local_process import ManagedProcess, start_process
 
 logger = logging.getLogger("alpha_lab.local_cpu")
-
-RUN_SCRIPT = """\
-#!/bin/bash
-cd {exp_dir}
-export PYTHONPATH={workspace}:$PYTHONPATH
-export CUDA_VISIBLE_DEVICES=""  # Disable GPU
-{python_exe} -c "
-import runpy, sys
-sys.argv = ['run_experiment.py']
-runpy.run_path('run_experiment.py', run_name='__main__')
-"
-"""
 
 
 @dataclass
 class LocalCPUJob:
     """Tracks a running local CPU subprocess."""
-    proc: subprocess.Popen
+    proc: ManagedProcess
     exp_name: str
     output_file: TextIO
     workspace: str
     start_time: float = 0.0
+    terminal_status: str | None = None
 
 
 class LocalCPUManager:
@@ -94,31 +83,30 @@ class LocalCPUManager:
         if not self.can_submit():
             raise RuntimeError(f"No CPU slot available (all {self.max_parallel} in use)")
 
+        workspace = str(Path(workspace).resolve())
         exp_dir = Path(workspace) / "experiments" / exp.name
+        exp_dir.resolve().relative_to(Path(workspace) / "experiments")
         exp_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write run script
-        script_content = RUN_SCRIPT.format(
-            exp_dir=str(exp_dir),
-            workspace=workspace,
-            python_exe=self.python_executable,
-        )
-        script_path = exp_dir / "run_cpu.sh"
-        script_path.write_text(script_content)
-        script_path.chmod(0o755)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = workspace + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        env["PYTHONIOENCODING"] = "utf-8"
+        runner = str(Path(__file__).with_name("local_runner.py"))
 
         # Open output file and spawn subprocess (try/finally to avoid fd leak)
         output_path = exp_dir / "cpu_job.out"
-        output_file = open(output_path, "w")
+        output_file = open(output_path, "w", encoding="utf-8")
         try:
-            proc = subprocess.Popen(
-                ["bash", str(script_path)],
+            proc = start_process(
+                [self.python_executable, "-u", runner, "cpu"],
                 stdout=output_file,
                 stderr=subprocess.STDOUT,
                 cwd=str(exp_dir),
-                start_new_session=True,
+                env=env,
+                python_executable=self.python_executable,
             )
-        except Exception:
+        except BaseException:
             output_file.close()
             raise
 
@@ -145,6 +133,9 @@ class LocalCPUManager:
                 continue
 
             job = self._jobs[job_id]
+            if job.terminal_status:
+                result[job_id] = job.terminal_status
+                continue
             retcode = job.proc.poll()
 
             if retcode is None:
@@ -155,13 +146,16 @@ class LocalCPUManager:
                         f"({elapsed:.0f}s > {self.time_limit}s), killing"
                     )
                     self._kill_job(job_id)
+                    job.terminal_status = "TIMEOUT"
                     result[job_id] = "TIMEOUT"
                 else:
                     result[job_id] = "RUNNING"
             elif retcode == 0:
+                job.terminal_status = "COMPLETED"
                 result[job_id] = "COMPLETED"
                 self._cleanup_job(job_id)
             else:
+                job.terminal_status = "FAILED"
                 result[job_id] = "FAILED"
                 logger.warning(f"CPU job {job_id} ({job.exp_name}) failed with exit code {retcode}")
                 self._cleanup_job(job_id)
@@ -173,24 +167,7 @@ class LocalCPUManager:
         if job_id not in self._jobs:
             return
         job = self._jobs[job_id]
-        if job.proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(job.proc.pid), signal.SIGTERM)
-                job.proc.wait(timeout=5)
-            except (ProcessLookupError, ChildProcessError):
-                pass  # Process already exited
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(job.proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, ChildProcessError):
-                    pass  # Process already exited
-                # Reap the child to prevent zombie
-                try:
-                    job.proc.wait(timeout=5)
-                except (subprocess.TimeoutExpired, OSError):
-                    pass
-            except OSError as e:
-                logger.warning("Failed to kill CPU job %s: %s", job_id, e)
+        job.proc.terminate_tree()
         self._cleanup_job(job_id)
 
     def cancel(self, job_id: str) -> None:
@@ -199,13 +176,17 @@ class LocalCPUManager:
             logger.warning(f"Cannot cancel unknown CPU job {job_id}")
             return
         job = self._jobs[job_id]
+        if job.terminal_status:
+            return
         logger.info(f"Cancelling CPU job {job_id} ({job.exp_name})")
         self._kill_job(job_id)
+        job.terminal_status = "CANCELLED"
 
     def _cleanup_job(self, job_id: str) -> None:
         """Close output file."""
         if job_id in self._jobs:
             job = self._jobs[job_id]
+            job.proc.close()
             try:
                 job.output_file.close()
             except OSError as e:
@@ -217,6 +198,8 @@ class LocalCPUManager:
             job = self._jobs[job_id]
             if job.proc.poll() is None:
                 self.cancel(job_id)
+            else:
+                self._cleanup_job(job_id)
         self._jobs.clear()
 
 

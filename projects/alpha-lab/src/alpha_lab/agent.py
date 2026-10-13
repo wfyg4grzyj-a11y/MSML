@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 import threading
 import time
 import uuid
@@ -282,6 +284,20 @@ class AgentLoop:
         """Build system instructions with current learnings."""
         learnings = self.context.get_learnings()
         prompt = self.prompt_builder(self.context.workspace, learnings, self.config)
+
+        if os.name == "nt":
+            prompt += (
+                "\n\n## Native Windows execution\n"
+                "This machine runs Windows. These runtime instructions override Unix shell examples. "
+                "shell_exec executes PowerShell. Use PowerShell syntax or portable Python scripts; "
+                "do not use Bash, shell heredocs, export, source, chmod, /tmp, or Unix utilities. "
+                "Use pathlib for paths and subprocess argument lists for processes. "
+                f"The current Python interpreter is {sys.executable!r}. "
+                "Use the PowerShell call operator & with a quoted interpreter path, "
+                "and use python -m pip for package installation. "
+                "Experiment execution is managed automatically; write run_experiment.py, "
+                "not shell launch scripts. Use sys.executable for Python child processes."
+            )
 
         if self.context.summary:
             prompt += (

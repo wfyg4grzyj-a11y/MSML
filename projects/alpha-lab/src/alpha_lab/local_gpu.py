@@ -8,83 +8,34 @@ to a specific GPU.
 from __future__ import annotations
 
 import logging
+import json
 import os
-import signal
 import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+import psutil
+
 from alpha_lab.experiment_db import Experiment
+from alpha_lab.local_process import ManagedProcess, RecoveredProcess, start_process
 
 logger = logging.getLogger("alpha_lab.local_gpu")
-
-
-class RecoveredProcess:
-    """Minimal wrapper for recovered process that implements poll() interface."""
-    def __init__(self, pid: int):
-        self.pid = pid
-        self.returncode = None
-
-    def poll(self):
-        """Check if process is still running."""
-        if self.returncode is not None:
-            return self.returncode
-        try:
-            os.kill(self.pid, 0)
-            return None  # Still running
-        except OSError:
-            self.returncode = 0  # Assume successful completion
-            return 0
-
-
-RUN_SCRIPT = """\
-#!/bin/bash
-cd {exp_dir}
-export PYTHONPATH={workspace}:$PYTHONPATH
-export CUDA_VISIBLE_DEVICES={gpu_id}
-export CUBLAS_WORKSPACE_CONFIG=:4096:8
-{python_exe} -c "
-import torch, runpy, sys
-# Override: disable deterministic algorithms regardless of what the experiment sets.
-# Many CUDA ops (upsample, scatter, median) don't support it and crash on H100s.
-_orig = torch.use_deterministic_algorithms
-def _patched(mode=True, **kw):
-    if mode:
-        print('[Local GPU wrapper] Intercepted torch.use_deterministic_algorithms(True) -> skipped')
-        return
-    _orig(mode, **kw)
-torch.use_deterministic_algorithms = _patched
-# Also patch Lightning's deterministic flag
-try:
-    import lightning.pytorch as pl
-    _orig_init = pl.Trainer.__init__
-    def _trainer_init(self, *a, deterministic=None, **kw):
-        if deterministic:
-            print('[Local GPU wrapper] Intercepted Trainer(deterministic=True) -> False')
-            deterministic = False
-        _orig_init(self, *a, deterministic=deterministic, **kw)
-    pl.Trainer.__init__ = _trainer_init
-except Exception:
-    pass
-sys.argv = ['run_experiment.py']
-runpy.run_path('run_experiment.py', run_name='__main__')
-"
-"""
 
 
 @dataclass
 class LocalJob:
     """Tracks a running local subprocess."""
-    proc: subprocess.Popen | RecoveredProcess
+    proc: ManagedProcess | RecoveredProcess
     gpu_id: int
     exp_name: str
     output_file: TextIO
     workspace: str
     start_time: float = 0.0  # time.time() when started
+    terminal_status: str | None = None
 
 
 class LocalGPUManager:
@@ -144,8 +95,37 @@ class LocalGPUManager:
         int
             Number of jobs recovered
         """
+        workspace = str(Path(workspace).resolve())
         self._workspace = workspace
         recovered = 0
+        runner = str(Path(__file__).with_name("local_runner.py"))
+        for job_id, exp_name in job_id_map.items():
+            exp_dir = (Path(workspace) / "experiments" / exp_name).resolve()
+            try:
+                exp_dir.relative_to(Path(workspace) / "experiments")
+                record = json.loads((exp_dir / "local_job.json").read_text(encoding="utf-8"))
+                if record["job_id"] != job_id or record["gpu_id"] not in self.gpu_ids:
+                    continue
+                if os.name == "nt" and not record.get("job_name"):
+                    continue
+                process = psutil.Process(record["pid"])
+                if process.create_time() != record["created"] or Path(process.cwd()).resolve() != exp_dir:
+                    continue
+                if runner not in process.cmdline():
+                    continue
+                proc = RecoveredProcess(record["pid"], created=record["created"],
+                                        job_name=record.get("job_name"),
+                                        exit_file=exp_dir / "local_exit_code.txt")
+                self._jobs[job_id] = LocalJob(
+                    proc=proc, gpu_id=record["gpu_id"], exp_name=exp_name,
+                    output_file=open(exp_dir / "local_job.out", "a", encoding="utf-8"),
+                    workspace=workspace, start_time=record["start_time"],
+                )
+                recovered += 1
+            except (OSError, ValueError, KeyError, psutil.Error):
+                continue
+        if os.name == "nt":
+            return recovered
 
         try:
             result = subprocess.run(
@@ -183,7 +163,7 @@ class LocalGPUManager:
                         job_id = jid
                         break
 
-                if not job_id:
+                if not job_id or job_id in self._jobs:
                     continue
 
                 gpu_id = -1
@@ -388,6 +368,7 @@ class LocalGPUManager:
 
     def submit_experiment(self, exp: Experiment, workspace: str) -> str:
         """Spawn experiment as subprocess. Returns job ID (UUID)."""
+        workspace = str(Path(workspace).resolve())
         if self._workspace is None:
             self._workspace = workspace
 
@@ -399,31 +380,25 @@ class LocalGPUManager:
             )
 
         exp_dir = Path(workspace) / "experiments" / exp.name
+        exp_dir.resolve().relative_to(Path(workspace) / "experiments")
         exp_dir.mkdir(parents=True, exist_ok=True)
+        (exp_dir / "local_exit_code.txt").unlink(missing_ok=True)
 
-        # Write run script
-        script_content = RUN_SCRIPT.format(
-            exp_dir=str(exp_dir),
-            workspace=workspace,
-            gpu_id=gpu_id,
-            python_exe=self.python_executable,
-        )
-        script_path = exp_dir / "run_local.sh"
-        script_path.write_text(script_content)
-        script_path.chmod(0o755)
-
-        # Open output file and spawn subprocess (try/finally to avoid fd leak)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = workspace + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        env["PYTHONIOENCODING"] = "utf-8"
+        runner = str(Path(__file__).with_name("local_runner.py"))
         output_path = exp_dir / "local_job.out"
-        output_file = open(output_path, "w")
+        output_file = open(output_path, "w", encoding="utf-8")
         try:
-            proc = subprocess.Popen(
-                ["bash", str(script_path)],
-                stdout=output_file,
-                stderr=subprocess.STDOUT,
-                cwd=str(exp_dir),
-                start_new_session=True,  # detach from terminal
+            proc = start_process(
+                [self.python_executable, "-u", runner, "gpu"],
+                stdout=output_file, stderr=subprocess.STDOUT, cwd=str(exp_dir),
+                env=env, python_executable=self.python_executable,
             )
-        except Exception:
+        except BaseException:
             output_file.close()
             raise
 
@@ -436,6 +411,17 @@ class LocalGPUManager:
             workspace=workspace,
             start_time=time.time(),
         )
+
+        try:
+            record = {
+                "job_id": job_id, "pid": proc.pid, "created": proc.created,
+                "gpu_id": gpu_id, "start_time": self._jobs[job_id].start_time,
+                "job_name": proc.job.name if proc.job else None,
+            }
+            (exp_dir / "local_job.json").write_text(json.dumps(record), encoding="utf-8")
+        except BaseException:
+            self.cancel(job_id)
+            raise
 
         logger.info(f"Submitted local job {job_id} for {exp.name} on GPU {gpu_id} (PID {proc.pid})")
         return job_id
@@ -455,24 +441,30 @@ class LocalGPUManager:
                 continue
 
             job = self._jobs[job_id]
+            if job.terminal_status:
+                result[job_id] = job.terminal_status
+                continue
             retcode = job.proc.poll()
 
             if retcode is None:
                 # Still running - check for timeout
                 elapsed = now - job.start_time
-                if self.time_limit > 0 and elapsed > self.time_limit:
+                if self.time_limit > 0 and job.start_time > 0 and elapsed > self.time_limit:
                     logger.warning(
                         f"Job {job_id} ({job.exp_name}) exceeded time limit "
                         f"({elapsed:.0f}s > {self.time_limit}s), killing"
                     )
                     self._kill_job(job_id)
+                    job.terminal_status = "TIMEOUT"
                     result[job_id] = "TIMEOUT"
                 else:
                     result[job_id] = "RUNNING"
             elif retcode == 0:
+                job.terminal_status = "COMPLETED"
                 result[job_id] = "COMPLETED"
                 self._cleanup_job(job_id)
             else:
+                job.terminal_status = "FAILED"
                 result[job_id] = "FAILED"
                 logger.warning(f"Job {job_id} ({job.exp_name}) failed with exit code {retcode}")
                 self._cleanup_job(job_id)
@@ -484,25 +476,7 @@ class LocalGPUManager:
         if job_id not in self._jobs:
             return
         job = self._jobs[job_id]
-        if job.proc.poll() is None:
-            try:
-                # Kill the whole process group
-                os.killpg(os.getpgid(job.proc.pid), signal.SIGTERM)
-                job.proc.wait(timeout=5)
-            except (ProcessLookupError, ChildProcessError):
-                pass  # Process already exited
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(job.proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, ChildProcessError):
-                    pass  # Process already exited
-                # Reap the child to prevent zombie
-                try:
-                    job.proc.wait(timeout=5)
-                except (subprocess.TimeoutExpired, OSError):
-                    pass
-            except OSError as e:
-                logger.warning("Failed to kill job %s: %s", job_id, e)
+        job.proc.terminate_tree()
         self._cleanup_job(job_id)
 
     def cancel(self, job_id: str) -> None:
@@ -511,13 +485,17 @@ class LocalGPUManager:
             logger.warning(f"Cannot cancel unknown job {job_id}")
             return
         job = self._jobs[job_id]
+        if job.terminal_status:
+            return
         logger.info(f"Cancelling job {job_id} ({job.exp_name})")
         self._kill_job(job_id)
+        job.terminal_status = "CANCELLED"
 
     def _cleanup_job(self, job_id: str) -> None:
         """Close output file and remove from tracking."""
         if job_id in self._jobs:
             job = self._jobs[job_id]
+            job.proc.close()
             try:
                 job.output_file.close()
             except OSError as e:
@@ -531,4 +509,6 @@ class LocalGPUManager:
             job = self._jobs[job_id]
             if job.proc.poll() is None:
                 self.cancel(job_id)
+            else:
+                self._cleanup_job(job_id)
         self._jobs.clear()

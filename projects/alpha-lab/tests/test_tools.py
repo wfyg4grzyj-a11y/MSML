@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -179,6 +181,13 @@ class TestGrepFiles:
 # execute_shell
 # ---------------------------------------------------------------------------
 
+def python_command(source: str) -> str:
+    if os.name == "nt":
+        interpreter = sys.executable.replace("'", "''")
+        source = source.replace("'", "''")
+        return f"& '{interpreter}' -c '{source}'"
+    return shlex.join([sys.executable, "-c", source])
+
 
 class TestExecuteShell:
     def test_simple_command(self, tmp_workspace: str) -> None:
@@ -187,16 +196,16 @@ class TestExecuteShell:
         assert "[exit code: 0]" in result
 
     def test_command_stderr(self, tmp_workspace: str) -> None:
-        result = execute_shell("echo err >&2", tmp_workspace)
+        result = execute_shell(python_command("import sys; print('err', file=sys.stderr)"), tmp_workspace)
         assert "[stderr]" in result
         assert "err" in result
 
     def test_command_failure(self, tmp_workspace: str) -> None:
-        result = execute_shell("false", tmp_workspace)
+        result = execute_shell(python_command("import sys; sys.exit(1)"), tmp_workspace)
         assert "[exit code: 1]" in result
 
     def test_timeout(self, tmp_workspace: str) -> None:
-        result = execute_shell("sleep 10", tmp_workspace, timeout=1)
+        result = execute_shell(python_command("import time; time.sleep(10)"), tmp_workspace, timeout=1)
         assert "[ERROR]" in result
         assert "timed out" in result.lower()
 
@@ -206,7 +215,7 @@ class TestExecuteShell:
         assert "fast" in result
 
     def test_cwd_is_workspace(self, tmp_workspace: str) -> None:
-        result = execute_shell("pwd", tmp_workspace)
+        result = execute_shell(python_command("import os; print(os.getcwd())"), tmp_workspace)
         # The resolved path might differ from tmp_workspace if there are symlinks,
         # but the output should contain the workspace directory name
         assert Path(tmp_workspace).name in result
