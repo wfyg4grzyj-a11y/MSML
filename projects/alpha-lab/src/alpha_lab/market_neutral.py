@@ -15,6 +15,7 @@ import duckdb
 from alpha_lab.market_data.sharadar_cli import load_config
 from alpha_lab.market_data.sharadar_store import atomic_json
 from alpha_lab.market_data.sharadar import file_hash
+from alpha_lab.equity_calendar import session_schedule, validate_benchmark, research_availability
 
 FEATURES = ("book_yield", "earnings_yield", "fcf_yield", "roa", "gross_profitability",
             "leverage", "momentum_12_1", "momentum_3_1", "reversal_1m", "low_vol")
@@ -57,14 +58,15 @@ def create_session_prices(db):
 
 
 def create_research_calendar(db, start, end):
-    db.execute('''CREATE TABLE calendar AS SELECT date,
-                  row_number() OVER(ORDER BY date) AS "session"
-                  FROM funds WHERE ticker='SPY'
-                  AND date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-                  ORDER BY date''', [start,end])
-    count, unique = db.execute("SELECT count(*),count(DISTINCT date) FROM calendar").fetchone()
-    if count<2 or count!=unique:
-        raise ValueError("Benchmark session calendar is empty or duplicated")
+    schedule, metadata = session_schedule(start, end)
+    benchmark = db.execute('''SELECT date,closeadj FROM funds WHERE ticker='SPY'
+                            AND date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+                            ORDER BY date''', [start, end]).df()
+    validate_benchmark(benchmark, schedule)
+    db.register('research_schedule', schedule)
+    db.execute('CREATE TABLE calendar AS SELECT * FROM research_schedule ORDER BY date')
+    db.unregister('research_schedule')
+    return metadata
 
 
 def prepare_panel(config: Path, output: Path, *, start="2014-01-01", end="2025-12-31",
@@ -93,7 +95,8 @@ def prepare_panel(config: Path, output: Path, *, start="2014-01-01", end="2025-1
     with store._connect() as db:
         for table, source in sources.items():
             db.read_parquet(source["path"]).create_view(table)
-        create_research_calendar(db,warmup,end)
+        calendar_metadata = create_research_calendar(db,warmup,end)
+        db.execute('SELECT * FROM calendar ORDER BY date').df().to_csv(output/'calendar.csv',index=False)
         db.execute("""CREATE TABLE months AS SELECT MAX(date) date FROM calendar
                       WHERE date >= CAST(? AS DATE) GROUP BY date_trunc('month',date)""", [start])
         db.execute("""CREATE TABLE securities AS SELECT DISTINCT ticker FROM tickers
@@ -158,16 +161,19 @@ def prepare_panel(config: Path, output: Path, *, start="2014-01-01", end="2025-1
                         tickers=np.asarray(tickers, dtype="U32"), returns=returns.to_numpy(dtype=np.float32),
                         price_observed=np.isfinite(closes.to_numpy()),
                         spy=spy.to_numpy(dtype=np.float32))
-    manifest = {"schema_version": 3, "preparation_sha256": preparation_hash,
+    manifest = {"schema_version": 4, "preparation_sha256": preparation_hash,
+                "calendar_preparation_sha256": file_hash(Path(__file__).with_name('equity_calendar.py')),
                 "raw_source_hashes_verified": True,
+                "calendar": {**calendar_metadata, "benchmark_complete": True},
+                "availability_assumptions": research_availability(),
                 "start": start, "end": end, "universe_size": universe_size,
                 "historical_tickers": len(tickers), "monthly_rows": len(features),
                 "months": features.date.nunique(), "features": list(FEATURES),
-                "filing_lag_calendar_days": 2, "max_filing_age_days": 550,
+                "filing_lag_calendar_days": 2, "max_available_age_days": 550, "max_filing_age_days": 552,
                 "minimum_raw_price": 5, "minimum_adv20_usd": 5_000_000,
                 "minimum_marketcap_usd": 500_000_000,
                 "price_window_policy": {
-                    "calendar": "SPY observed US sessions; no quote forward fill",
+                    "calendar": "XNYS modeled sessions; SPY completeness validated; no quote forward fill",
                     "momentum_offsets_sessions": [21,63,252],
                     "liquidity_sessions": 20, "minimum_liquidity_observations": 20,
                     "history_sessions": 252, "minimum_history_observations": 252,
@@ -178,9 +184,11 @@ def prepare_panel(config: Path, output: Path, *, start="2014-01-01", end="2025-1
                                 "Ticker continuity and issuer class mapping are not fully audited",
                                 "Missing and terminal returns require stress analysis",
                                 "No historical borrow availability or locate fees",
-                                "Monthly estimated beta neutrality does not ensure realized beta neutrality"]}
+                                "Monthly estimated beta neutrality does not ensure realized beta neutrality",
+                                "Historical source delivery and market-cap share vintages are unverified",
+                                "Exchange-rule calendar is modeled, not an independent historical-feed attestation"]}
     manifest["files"] = {name: file_hash(output/name) for name in
-                         ("sources.json","features.parquet","actions.parquet","returns.npz")}
+                         ("sources.json","features.parquet","actions.parquet","returns.npz","calendar.csv")}
     atomic_json(output / "panel.json", manifest)
     print(json.dumps(manifest), flush=True)
     return manifest
@@ -235,18 +243,27 @@ class MarketNeutralBacktest:
     def __init__(self, panel: Path):
         self.panel = panel = Path(panel)
         self.panel_integrity_verified = False
+        self.calendar_verified = False
+        self.availability_assumptions = {"status": "Legacy panel: availability assumptions not fully recorded",
+                                        "point_in_time_attested": False}
+        manifest = {}
         if (panel/"panel.json").exists():
             manifest=json.loads((panel/"panel.json").read_text())
             files=manifest.get("files",{})
             if not isinstance(files,dict):
                 raise ValueError("Research panel file hashes are invalid")
             for name, expected in files.items():
-                if name not in {"sources.json","features.parquet","actions.parquet","returns.npz"}:
+                if name not in {"sources.json","features.parquet","actions.parquet","returns.npz","calendar.csv"}:
                     raise ValueError("Unknown research panel file")
                 if file_hash(panel/name)!=expected:
                     raise ValueError("Research panel file hash mismatch")
-            self.panel_integrity_verified = set(files)=={
-                "sources.json","features.parquet","actions.parquet","returns.npz"}
+            required_files = {"sources.json","features.parquet","actions.parquet","returns.npz"}
+            if manifest.get('schema_version',0) >= 4:
+                required_files.add('calendar.csv')
+                if set(files) != required_files:
+                    raise ValueError("Research panel calendar evidence or file hashes are incomplete")
+            self.panel_integrity_verified = set(files)==required_files
+            self.availability_assumptions = manifest.get('availability_assumptions',self.availability_assumptions)
         self.features = duckdb.read_parquet(str(panel / "features.parquet")).df()
         with np.load(panel / "returns.npz", allow_pickle=False) as raw:
             self.dates = pd.DatetimeIndex(raw["dates"])
@@ -258,6 +275,19 @@ class MarketNeutralBacktest:
                 or len(self.dates)<2 or len(set(self.tickers))!=len(self.tickers)
                 or not self.tickers or any(not isinstance(t,str) or not t for t in self.tickers)):
             raise ValueError("Research panel dates or security identities are invalid")
+        if manifest.get('schema_version',0) >= 4:
+            recorded = pd.read_csv(panel/'calendar.csv',parse_dates=['date'])
+            if not {'start','end'} <= set(manifest):
+                raise ValueError("Research panel calendar date bounds are incomplete")
+            warmup = (pd.Timestamp(manifest['start'])-pd.DateOffset(years=2)).strftime('%Y-%m-%d')
+            expected, _ = session_schedule(warmup,manifest['end'])
+            if not pd.DatetimeIndex(recorded.date).equals(self.dates):
+                raise ValueError("Research panel calendar does not match return dates")
+            try:
+                pd.testing.assert_frame_equal(recorded,expected,check_dtype=False)
+            except AssertionError:
+                raise ValueError("Research panel calendar evidence differs from the exchange schedule") from None
+            self.calendar_verified = True
         if self.returns.shape!=(len(self.dates),len(self.tickers)) or self.spy.shape!=(len(self.dates),):
             raise ValueError("Research panel array dimensions are inconsistent")
         if (np.isinf(self.returns).any() or np.any(self.returns < -1) or np.isinf(self.spy).any()
@@ -371,6 +401,8 @@ class MarketNeutralBacktest:
                   "max_abs_net_exposure": float(np.max(np.abs(np.asarray(exposures)[:,0]))),
                   "mean_gross_exposure": float(np.mean(np.asarray(exposures)[:,1])),
                   "panel_integrity_verified": self.panel_integrity_verified,
+                  "calendar_verified": self.calendar_verified,
+                  "availability_assumptions": self.availability_assumptions,
                   "missing_price_policy": "Zero marked return, assumed stale-price exit and subsequent repair; economic proceeds unresolved",
                   "terminal_actions_reconciled": False,
                   "investment_ready": False,

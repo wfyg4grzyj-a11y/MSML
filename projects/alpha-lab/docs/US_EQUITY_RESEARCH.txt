@@ -31,11 +31,12 @@ The panel uses monthly universes of the 500 largest qualifying primary domestic
 common stocks, including currently delisted names. Formation uses raw price >=$5,
 20-session average dollar volume >=$5m with all 20 quotes present, 252 valid
 price observations in the preceding 252 sessions, and dated market cap >=$500m. It uses ART
-as-reported trailing financials, a two-calendar-day filing lag, and a maximum
-filing age of 550 days. DAILY market cap is converted from USD millions to USD.
-Signals use percentile ranks. Momentum requires exact prices 21/63/252 SPY
+as-reported trailing financials, a two-calendar-day filing lag, and at most
+550 days after assumed availability (552 calendar days after filing). DAILY
+market cap is converted from USD millions to USD.
+Signals use percentile ranks. Momentum requires exact prices 21/63/252 exchange
 sessions earlier; gaps never substitute an older quote. Volatility, beta and
-liquidity also use the SPY session calendar. A gap-spanning price change is missing
+liquidity use the same session calendar. A gap-spanning price change is missing
 rather than a one-session return. Nonpositive adjusted quotes are missing.
 No current index membership is used. Static domestic security categories are not
 a dated security master. Earlier panel versions used observed-row momentum;
@@ -45,6 +46,38 @@ hash. Loading verifies panel hashes before reading and rejects inconsistent
 array dimensions, duplicate identities/dates, impossible price returns,
 missing benchmark sessions and future accounting information. Legacy panels
 without complete hashes are explicitly marked unverified.
+
+New panels validate SPY date coverage against XNYS modeled exchange sessions,
+including exceptional closures and early closes. Missing dates at either end,
+missing interior dates, duplicates, extra non-session dates, and nonpositive or
+nonfinite benchmark prices fail preparation before security windows are built.
+calendar.csv records session numbers, UTC closes and early-close flags; its hash,
+calendar-library version and calendar preparation hash are pinned in panel.json.
+Loading v4 panels verifies that evidence and the full requested session range.
+This community-maintained exchange-rule model is not an independently attested
+historical exchange feed. Earlier panels remain immutable and can be audited.
+
+Availability assumptions are now recorded in each newly prepared panel and its
+result artifacts. EOD prices/volume and same-date DAILY market cap are assumed
+usable before the following session close; published vendor delivery schedules
+do not prove every historical record's arrival. The two-calendar-day ART filing
+lag is an assumed availability rule. Current snapshots and share-count vintages
+have not been independently replayed. DAILY market cap is used as supplied,
+without issuer aggregation or a separately dated share-count reconstruction.
+Those limitations prevent a point-in-time attestation even when date joins pass.
+
+Create a local quality audit and unresolved evidence queue without any backtest:
+  python -m alpha_lab.equity_quality --panel data/market/research/panel-new --output data/market/research/quality-new
+Optionally pass --terminal-audit data/market/research/terminal-audit-original
+to link separately frozen ex-post event evidence. The audit verifies all six raw
+snapshot hashes, full calendar coverage and independently reconstructed SPY
+returns. Accounting quality summaries stop in 2022; no performance calculation
+or candidate selection occurs. It records historical-arrival, security/issuer,
+market-cap, terminal and borrow/execution evidence still needed. Each supplied
+terminal event retains the original audit's scope, with no current-panel payout
+attestation. quality-queue.json and exchange-sessions.csv are hashed artifacts.
+Passing mechanical checks leaves investment_ready, point_in_time_attested and
+terminal_actions_reconciled false while economic evidence remains unresolved.
 
 Portfolio construction projects scores off an intercept and trailing SPY beta.
 Gross exposure is at most 1; each name is capped at 2% by reducing overall gross.
@@ -169,5 +202,6 @@ Primary methodology references:
   https://sharadar.com/docs/daily
   https://sharadar.com/docs/stocks
   https://sharadar.com/docs/actions
+  https://github.com/gerrymanoim/exchange_calendars
   https://developers.openai.com/api/docs/guides/reasoning
   https://developers.openai.com/api/docs/guides/function-calling

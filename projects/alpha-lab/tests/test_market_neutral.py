@@ -108,7 +108,8 @@ def test_session_windows_do_not_stretch_over_missing_quotes():
 
 def test_research_calendar_uses_sorted_unique_benchmark_sessions():
     funds=pd.DataFrame({"ticker":['SPY','OTHER','SPY','SPY'],
-                        "date":pd.to_datetime(['2014-01-06','2014-01-07','2014-01-03','2014-01-02'])})
+                        "date":pd.to_datetime(['2014-01-06','2014-01-07','2014-01-03','2014-01-02']),
+                        "closeadj":[100.,100.,99.,98.]})
     with duckdb.connect() as db:
         db.register('funds',funds)
         create_research_calendar(db,'2014-01-03','2014-01-06')

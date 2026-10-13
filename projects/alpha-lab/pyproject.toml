@@ -35,7 +35,7 @@ alpha-lab-equity = "alpha_lab.equity_pilot:main"
 
 [project.optional-dependencies]
 risk-data = ["exchange-calendars>=4.11,<5"]
-equity-research = ["numpy>=1.26,<3", "pandas>=2.2,<4"]
+equity-research = ["numpy>=1.26,<3", "pandas>=2.2,<4", "exchange-calendars>=4.11,<5"]
 
 [build-system]
 requires = ["hatchling"]
