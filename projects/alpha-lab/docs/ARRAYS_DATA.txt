@@ -1,0 +1,117 @@
+Arrays US equity extension
+==========================
+
+The existing Sharadar-first policy remains in force. Tiingo keeps its existing
+coverage, including feeds whose adapters have not yet been implemented. Arrays
+is enabled only for the seven distinct datasets below. Provider outages, stale
+caches, missing adapters and rate limits never switch a covered feed to Arrays.
+The default bulk sync does not query Arrays: select one dataset and ticker.
+
+Dataset                Arrays source                    Meaning
+consensus_estimates    stocks/estimates-guidance         Analyst consensus
+company_guidance       stocks/estimates-guidance         Issuer guidance
+earnings_transcripts   stocks/earnings-transcript        Fiscal-period transcript
+finra_short_interest   stocks/short-interest             FINRA reported positions
+dark_pool_activity     stocks/darkpool                   Off-exchange activity
+equity_ratings         stocks/ratings                    Vendor financial scores
+etf_holdings           etf/holdings                      Current fund portfolio
+
+ETF portfolios are distinct from Sharadar institutional 13F holdings. Vendor
+financial scores are not broker recommendations. Off-exchange activity does not
+replace the primary stock price series. Prices, fundamentals, company metadata,
+actions, insiders, institutional holdings and S&P 500 data remain with Sharadar;
+existing earlier-history price selection remains with Tiingo. News, intraday
+prices, fund fees, detailed dividends and overnight prices remain Tiingo feeds,
+even where our Tiingo adapter is pending. Crypto, FX, macro and options feeds
+are excluded. Unknown dataset names and arbitrary API paths are rejected.
+
+US scope
+--------
+Each request requires verified local Sharadar TICKERS metadata: US-listed USD
+common stock or ADR on an approved exchange, with a permanent security ID.
+US-listed ADRs count as US equity listings; this is not a US-domicile screen.
+Scope is a current reference check, not historical eligibility attestation.
+Both BRK.B and BRK-B inputs normalize to the reference symbol BRK.B.
+
+ETF access initially covers reviewed US equity mandates SPY, QQQ and IWM. A US
+listing alone does not qualify a bond, commodity, crypto or international fund.
+The parent ETF is identified by the response's symbol field; constituent ticker
+is its asset field. Only verified US equity constituents are retained. Cash,
+foreign listings, other assets and unresolved identifiers are excluded and
+counted. Original weights are retained without renormalization. Exports are
+therefore scope-filtered portfolios, not guaranteed complete fund portfolios.
+No historical ETF date parameter is supported; this is a current snapshot feed.
+
+Configuration and use
+---------------------
+Put ARRAYS_API_KEY in the project .env file; never in a JSON config or command.
+Keep the filename exactly .env, not .env.txt. The shared CLI loads .env on sync
+without overwriting an existing process environment. No LLM API is invoked.
+
+data/market.example.json references data/arrays.example.json. The existing local
+data/market/pipeline.json references arrays.json in the same directory. Copy the
+examples and adjust roots for another installation. Paths are relative to the
+configuration file. Credentials and custom API hosts are rejected in config.
+Arrays uses X-API-Key over HTTPS to the fixed documented Arrays API host.
+Redirects, automatic retries, payment authorizations and billing upgrades are
+disabled. HTTP failures retain the last successful snapshot.
+
+From the alpha-lab project directory, with its Python environment activated:
+
+alpha-lab-data catalog
+alpha-lab-data route --dataset finra_short_interest --ticker AAPL
+alpha-lab-data sync --dataset finra_short_interest --ticker AAPL --start-date 2026-10-01 --end-date 2026-10-13
+alpha-lab-data sync --dataset consensus_estimates --ticker AAPL --metrics EPS,SALES --period-type quarterly --fiscal-year 2026 --fiscal-quarter Q4 --start-date 2026-10-01 --end-date 2026-10-13
+alpha-lab-data sync --dataset company_guidance --ticker AAPL --metrics EPS --start-date 2026-10-01 --end-date 2026-10-13
+alpha-lab-data sync --dataset earnings_transcripts --ticker AAPL --fiscal-year 2026 --fiscal-quarter Q3
+alpha-lab-data sync --dataset equity_ratings --ticker AAPL --start-date 2026-10-01 --end-date 2026-10-13
+alpha-lab-data sync --dataset dark_pool_activity --ticker AAPL --start-date 2026-10-13 --end-date 2026-10-13
+alpha-lab-data sync --dataset etf_holdings --ticker SPY
+alpha-lab-data export --dataset finra_short_interest --ticker AAPL --output data/market/exports/aapl-short-interest.json
+
+Equivalent invocation: python -m alpha_lab.market_data.pipeline [arguments].
+Use --config before the subcommand to select a different pipeline config.
+Forecast periods may be future periods; start/end select observation history,
+not forecast fiscal-period dates. Transcripts require fiscal year and period;
+quarterly transcripts require Q1-Q4. They do not accept start/end date filters.
+Short-interest windows explicitly use UPDATED_AT, retaining settlement dates.
+Publication lag means settlement dates must not be treated as availability.
+Other dated feeds default to the last 30 UTC dates ending yesterday. Dark-pool
+requests are capped at 32 days; use separate immutable windows for longer work.
+
+Storage and integrity
+---------------------
+Each completed sync stores native JSON records in a new UUID snapshot folder,
+with hashes, request parameters, scope reference, local retrieval time and
+limitations. Forecast offset pagination preserves observations across multiple
+fiscal periods and metrics. Transcript nesting and vendor timestamps remain
+intact. Incomplete pages, repeated pages, row/byte/time caps, malformed bodies,
+unexpected securities and all-excluded holdings reject snapshot publication.
+An OS-held writer lock protects concurrent ingestion. The latest pointer moves
+only after successful publication; previous snapshots remain preserved.
+
+Default limits: 100 rows/page, 10 pages, 5,000 retained rows, 8 MB response data,
+15 seconds/request, 90 seconds/run and 30 requests/minute. Nonpaged endpoints
+cannot silently publish an explicit truncated response. Ratings responses at
+their request limit are rejected; narrow the window. Pagination follows each
+endpoint's documented contract, not a generic cursor assumption.
+
+Export is offline and hash-checked. It copies the latest completed request to a
+new immutable JSON/CSV filename with a provenance sidecar identifying the exact
+source version. CSV nests lists/dicts as JSON. Export does not accept date,
+fiscal, dimension or column filtering; create a new bounded sync for a different
+request. Superseded UUID versions remain available in the local cache, but the
+general CLI export currently selects latest only. Arrays status is inspectable
+through cached manifests; the existing status command reports primary tables.
+
+Availability, publication timestamps and local capture time are distinct. These
+records are not independently point-in-time attested. Current downloads cannot
+reconstruct historical uncaptured vendor vintages. Existing panel/strategy
+pipelines do not automatically ingest these new factors or re-evaluate holdout
+results. FINRA short interest is not stock-loan availability, locate evidence
+or lending cost. The historical borrow evidence gap remains open.
+
+Official contracts reviewed:
+https://docs.arrays.org/api-reference/introduction
+https://docs.arrays.org/llms.txt
+Base API: https://data-tools.prd.arrays.org/api

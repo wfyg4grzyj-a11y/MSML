@@ -1,0 +1,10 @@
+{
+  "root": "market/arrays",
+  "page_size": 100,
+  "max_pages": 10,
+  "max_rows": 5000,
+  "max_bytes": 8000000,
+  "timeout_seconds": 15,
+  "run_seconds": 90,
+  "requests_per_minute": 30
+}

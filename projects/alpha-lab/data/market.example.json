@@ -1,5 +1,6 @@
 {
   "sharadar_config": "sharadar.example.json",
   "tiingo_config": "tiingo.example.json",
+  "arrays_config": "arrays.example.json",
   "tickers": ["SPY"]
 }
