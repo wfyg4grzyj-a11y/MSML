@@ -122,6 +122,50 @@ def share_basis_diagnostics(rows, tolerance=0.01, *, marketcap_unit='USD'):
             'scope': 'ART filings through 2022 for current panel securities; not DAILY share-vintage or issuer aggregation attestation'}, flagged
 
 
+def share_flag_scope(flagged, features, quote_bounds):
+    """Explain missing filing-date quotes without filling values or changing data.
+
+    Filings outside a security's observed quote history can legitimately lack a
+    filing-date market price. Check whether the flagged filing is actually used
+    before removing it from the numeric-repair queue. Bounds are computed from
+    pinned raw quotes, not inferred from today's listing status.
+    """
+    if quote_bounds.ticker.duplicated().any():
+        raise ValueError('Unique raw quote bounds required for each security')
+    result = flagged.copy()
+    if result.empty:
+        return {'flagged_records': 0, 'explained_outside_quote_history': 0,
+                'records_requiring_review': 0, 'used_train_validation_rows': 0}, result
+    result['date'] = pd.to_datetime(result.date)
+    result['reportperiod'] = pd.to_datetime(result.reportperiod)
+    bounds = quote_bounds.copy()
+    bounds['first_quote'] = pd.to_datetime(bounds.first_quote)
+    bounds['last_quote'] = pd.to_datetime(bounds.last_quote)
+    if (bounds.first_quote > bounds.last_quote).any():
+        raise ValueError('Raw quote bounds are inverted')
+    used = features.loc[pd.to_datetime(features.date) <= pd.Timestamp('2022-12-31')].copy()
+    used['filing_date'] = pd.to_datetime(used.filing_date)
+    used['reportperiod'] = pd.to_datetime(used.reportperiod)
+    counts = used.groupby(['ticker', 'filing_date', 'reportperiod']).size().reset_index(name='used_train_validation_rows')
+    result = result.merge(bounds, on='ticker', how='left', validate='many_to_one')
+    result = result.merge(counts, left_on=['ticker', 'date', 'reportperiod'],
+                          right_on=['ticker', 'filing_date', 'reportperiod'], how='left', validate='many_to_one')
+    result['used_train_validation_rows'] = result.used_train_validation_rows.fillna(0).astype(int)
+    before = result.date < result.first_quote
+    after = result.date > result.last_quote
+    unknown = result.first_quote.isna() | result.last_quote.isna() | result.date.isna()
+    result['quote_history_scope'] = np.select([unknown, before, after],
+                                            ['unknown', 'before_first_quote', 'after_last_quote'], default='within_quote_history')
+    explained = (before | after) & ~unknown & (result.used_train_validation_rows == 0)
+    result['review_status'] = np.where(explained, 'explained_outside_quote_history', 'requires_review')
+    return {'flagged_records': len(result), 'before_first_quote': int(before.sum()),
+            'after_last_quote': int(after.sum()), 'unknown_quote_history': int(unknown.sum()),
+            'explained_outside_quote_history': int(explained.sum()),
+            'records_requiring_review': int((~explained).sum()),
+            'used_train_validation_rows': int(result.used_train_validation_rows.sum()),
+            'scope': 'Ex-post filing quote diagnostics; no historical eligibility or feed-arrival attestation'}, result
+
+
 def terminal_work_items(events):
     """Separate conditions required to move diagnostic terms into economic data."""
     records = []
@@ -167,12 +211,12 @@ def audit_reference(panel, quality, terminal, output):
             raise ValueError('Terminal evidence hash mismatch')
     terminal_pins = json.loads((terminal / 'sources.json').read_text())
     pins['descriptions'] = terminal_pins['descriptions']
-    for name in ('tickers', 'actions', 'fundamentals', 'descriptions'):
+    for name in ('tickers', 'actions', 'fundamentals', 'descriptions', 'stocks'):
         if file_hash(Path(pins[name]['path'])) != pins[name]['parquet_sha256']:
             raise ValueError('Raw reference-source hash mismatch')
-    observed = max(observation_time(pins[name]['retrieved_at']) for name in ('tickers', 'actions', 'fundamentals'))
+    observed = max(observation_time(pins[name]['retrieved_at']) for name in ('tickers', 'actions', 'fundamentals', 'descriptions', 'stocks'))
     with duckdb.connect(':memory:', config={'memory_limit': '1GB', 'threads': '2'}) as db:
-        for name in ('tickers', 'actions', 'fundamentals', 'descriptions'):
+        for name in ('tickers', 'actions', 'fundamentals', 'descriptions', 'stocks'):
             db.read_parquet(pins[name]['path']).create_view(name)
         db.read_parquet(str(panel / 'features.parquet')).create_view('features')
         selected = db.execute('SELECT DISTINCT ticker FROM features ORDER BY ticker').df()
@@ -183,6 +227,8 @@ def audit_reference(panel, quality, terminal, output):
                               FROM fundamentals f JOIN selected USING(ticker)
                               WHERE dimension='ART' AND date BETWEEN DATE '2012-01-01' AND DATE '2022-12-31'
                               ORDER BY ticker,date""").df()
+        quote_bounds = db.execute('SELECT ticker,min(date) first_quote,max(date) last_quote FROM stocks JOIN selected USING(ticker) GROUP BY ticker').df()
+        used_features = db.execute("SELECT ticker,date,filing_date,reportperiod FROM features WHERE date<=DATE '2022-12-31'").df()
         units = db.execute("""SELECT \"table\",indicator,unittype FROM descriptions
                               WHERE (\"table\"='SF1' AND indicator IN ('marketcap','price','sharesbas','sharefactor'))
                                  OR (\"table\"='DAILY' AND indicator='marketcap') ORDER BY \"table\",indicator""").df()
@@ -198,6 +244,7 @@ def audit_reference(panel, quality, terminal, output):
     for row in identities + transitions:
         row['observed_at'] = observed.isoformat()
     shares, flagged = share_basis_diagnostics(facts, marketcap_unit=cap_units.iloc[0].unittype)
+    flag_scope, scoped_flags = share_flag_scope(flagged, used_features, quote_bounds)
     events = json.loads((terminal / 'events.json').read_text())
     work = terminal_work_items(events)
     queue = json.loads((quality / 'quality-queue.json').read_text())
@@ -214,7 +261,7 @@ def audit_reference(panel, quality, terminal, output):
             item['required_checks'] = reasons[item['id']]['required_checks']
             item['vendor_diagnostic_terms_present'] = reasons[item['id']]['vendor_diagnostic_terms_present']
     output.mkdir(parents=True)
-    atomic_json(output / 'source-pins.json', {name: pins[name] for name in ('tickers', 'actions', 'fundamentals', 'descriptions')})
+    atomic_json(output / 'source-pins.json', {name: pins[name] for name in ('tickers', 'actions', 'fundamentals', 'descriptions', 'stocks')})
     atomic_json(output / 'unit-evidence.json', units.to_dict('records'))
     atomic_json(output / 'security-identities.json', identities)
     atomic_json(output / 'attribute-transitions.json', transitions)
@@ -222,12 +269,13 @@ def audit_reference(panel, quality, terminal, output):
     atomic_json(output / 'terminal-work-items.json', work)
     atomic_json(output / 'quality-queue.json', queue)
     flagged.to_csv(output / 'share-basis-flags.csv', index=False)
+    scoped_flags.to_csv(output / 'share-basis-scope.csv', index=False)
     summary = {'created_utc': datetime.now(timezone.utc).isoformat(), 'observed_at': observed.isoformat(),
                'panel_sha256': file_hash(panel / 'panel.json'),
                'stable_security_ids': len([row for row in identities if row['status'] == 'mapped']),
                'security_id_unresolved': len([row for row in identities if row['status'] != 'mapped']),
                'paired_attribute_transitions': len(transitions), 'transition_conflicts': len(conflicts),
-               'share_basis': shares, 'terminal_observations': len(work),
+               'share_basis': shares, 'share_flag_scope': flag_scope, 'terminal_observations': len(work),
                'terminal_classifications': dict(Counter(row['classification'] for row in work)),
                'open_original_issues': len([row for row in queue if row['status'] == 'open']),
                'point_in_time_attested': False, 'terminal_actions_reconciled': False, 'investment_ready': False,

@@ -3,7 +3,7 @@ import pytest
 pd = pytest.importorskip('pandas')
 pytest.importorskip('duckdb')
 
-from alpha_lab.equity_reference import paired_transitions, share_basis_diagnostics, stable_identities, terminal_work_items
+from alpha_lab.equity_reference import paired_transitions, share_basis_diagnostics, share_flag_scope, stable_identities, terminal_work_items
 
 
 def metadata():
@@ -68,6 +68,27 @@ def test_unknown_cap_unit_is_not_guessed():
         share_basis_diagnostics(pd.DataFrame(), marketcap_unit='unknown')
 
 
+def test_quote_scope_distinguishes_expected_missing_prices_and_used_records():
+    flags = pd.DataFrame({'ticker': ['A', 'A', 'A', 'MISSING'],
+                          'date': pd.to_datetime(['2013-01-01', '2021-01-01', '2015-01-01', '2015-01-01']),
+                          'reportperiod': pd.to_datetime(['2012-12-31'] * 4)})
+    bounds = pd.DataFrame({'ticker': ['A'], 'first_quote': [pd.Timestamp('2014-01-01')], 'last_quote': [pd.Timestamp('2020-01-01')]})
+    features = pd.DataFrame({'ticker': ['A', 'A'], 'date': pd.to_datetime(['2016-01-01', '2023-01-01']),
+                             'filing_date': pd.to_datetime(['2013-01-01', '2021-01-01']),
+                             'reportperiod': pd.to_datetime(['2012-12-31'] * 2)})
+    result, records = share_flag_scope(flags, features, bounds)
+    assert result['explained_outside_quote_history'] == 1 and result['records_requiring_review'] == 3
+    assert result['used_train_validation_rows'] == 1
+    assert records.review_status.tolist() == ['requires_review', 'explained_outside_quote_history', 'requires_review', 'requires_review']
+    assert records.quote_history_scope.tolist() == ['before_first_quote', 'after_last_quote', 'within_quote_history', 'unknown']
+
+
+def test_quote_scope_rejects_duplicate_bounds():
+    bounds = pd.DataFrame({'ticker': ['A', 'A']})
+    with pytest.raises(ValueError, match='Unique'):
+        share_flag_scope(pd.DataFrame(), pd.DataFrame(), bounds)
+
+
 def test_terminal_tasks_never_promote_diagnostic_proceeds_or_infer_bankruptcy_zero():
     rows = terminal_work_items([{'ticker': 'A', 'date': '2020-01-01', 'classification': 'insolvency'},
                                {'ticker': 'B', 'date': '2020-01-02', 'classification': 'stock', 'diagnostic_consideration_usd_per_share': 50.}])
@@ -93,13 +114,16 @@ def reference_inputs(tmp_path):
                                      'marketcap': [100e6], 'sharesbas': [1e6], 'price': [50.], 'sharefactor': [2.]}),
         'descriptions': pd.DataFrame({'table': ['SF1'] * 4 + ['DAILY'],
                                      'indicator': ['marketcap', 'price', 'sharesbas', 'sharefactor', 'marketcap'],
-                                     'unittype': ['USD', 'USD/share', 'units', 'ratio', 'USD millions']})}
+                                     'unittype': ['USD', 'USD/share', 'units', 'ratio', 'USD millions']}),
+        'stocks': pd.DataFrame({'ticker': ['A'], 'date': [pd.Timestamp('2014-01-02')], 'closeunadj': [50.]})}
     pins = {}
     for tag, frame in frames.items():
         path = tmp_path / (tag + '.parquet')
         duckdb.from_df(frame).write_parquet(str(path))
         pins[tag] = {'path': str(path), 'parquet_sha256': file_hash(path), 'retrieved_at': '2026-10-13T10:00:00Z'}
-    duckdb.from_df(pd.DataFrame({'ticker': ['A'], 'date': [pd.Timestamp('2014-01-31')]})).write_parquet(str(panel / 'features.parquet'))
+    duckdb.from_df(pd.DataFrame({'ticker': ['A'], 'date': [pd.Timestamp('2014-01-31')],
+                                 'filing_date': [pd.Timestamp('2014-01-02')],
+                                 'reportperiod': [pd.Timestamp('2013-12-31')]})).write_parquet(str(panel / 'features.parquet'))
     (panel / 'sources.json').write_text(json.dumps({tag: pin for tag, pin in pins.items() if tag != 'descriptions'}))
     (panel / 'panel.json').write_text(json.dumps({'files': {name: file_hash(panel / name) for name in ('features.parquet', 'sources.json')}}))
     (terminal / 'sources.json').write_text(json.dumps(pins))

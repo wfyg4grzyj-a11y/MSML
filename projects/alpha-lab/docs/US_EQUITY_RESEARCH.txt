@@ -365,6 +365,12 @@ ShareFactor reconstructs SF1 cap. Invalid/missing bases and differences above
 the explicit 1% relative diagnostic threshold are exported for review. Formula
 agreement does not prove the historical DAILY share-count vintage, issuer
 aggregation or borrow/execution feasibility. No panel or P&L is changed.
+The audit independently computes each security's first/last pinned raw quote
+dates and joins flagged filing/report-period keys to train/validation features.
+Missing filing-date prices outside quote history are marked explained only if
+the record is unused there. Within-history gaps, unknown bounds and used records
+stay in review. share-basis-scope.csv preserves every original flag alongside
+its quote-range classification and exact count of matching formation rows.
 Each terminal observation has separate checks for entitlement, share basis,
 cash receivable/payment, stock delivery, elections, fractional shares and
 source observation time. Bankruptcy does not imply zero proceeds. Diagnostic
