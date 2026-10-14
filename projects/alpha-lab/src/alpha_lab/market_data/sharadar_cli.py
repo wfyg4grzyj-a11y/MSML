@@ -53,6 +53,7 @@ def main(argv=None):
     export.add_argument("--start-date", type=date.fromisoformat)
     export.add_argument("--end-date", type=date.fromisoformat)
     export.add_argument("--dimension")
+    export.add_argument("--observed-before", help="Use only a snapshot captured by this ISO timestamp with timezone")
     export.add_argument("--columns", help="Comma-separated original field names")
     args = parser.parse_args(argv)
     try:
@@ -63,7 +64,8 @@ def main(argv=None):
             result = store.export(args.table, args.output, tickers=args.ticker,
                                   start=str(args.start_date) if args.start_date else None,
                                   end=str(args.end_date) if args.end_date else None,
-                                  dimension=args.dimension, columns=args.columns.split(",") if args.columns else None)
+                                  dimension=args.dimension, columns=args.columns.split(",") if args.columns else None,
+                                  observed_before=args.observed_before)
             print(json.dumps(result, indent=2))
         else:
             load_dotenv(args.env_file, override=False)
