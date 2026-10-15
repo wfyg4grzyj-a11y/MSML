@@ -1,0 +1,152 @@
+US large-cap JKP factor platform
+================================
+
+Install optional numerical dependencies in the chosen environment:
+  python -m pip install -e ".[factor-research]"
+The tested native environment uses Clarabel0.11.1 and the existing numerical stack.
+
+Pipeline
+---------
+Shared smoothed cap/liquidity universe -> JKP raw provider reconstructions ->
+industry factors -> official themes -> ideal model -> expected-return prior ->
+large sparse conic optimizer -> provisional total-return-unit execution diagnostic.
+This is distinct from schema3 raw-share action accounting. Historical metadata,
+vendor adjustment/revision and actual stock-loan/settlement evidence remain open.
+No investment acceptance or exact WRDS/CRSP/Compustat replication is implied.
+
+The compiled public catalog retains all153 published JKP factor IDs, signs,
+references and13 themes at official commit666e8960ed81a664f1e9f189f92925ab2eeffcd5.
+It explicitly separates provider reconstructions from blocked/unverified items.
+Formula computations live in jkp_signals.py; raw, construction and outcome
+missingness are independent. Provider IDs differ from canonical JKP IDs. Examine
+the catalog/coverage entries and their disclosed basis differences before use.
+References: https://jkpfactors.com/data and https://github.com/bkelly-lab/jkp-data
+Jensen, Kelly and Pedersen(2023), Journal of Finance78(5),2465-2518.
+
+Shared universe
+----------------
+UniversePolicy uses monthly reviews, prior63 official sessions' median cap and
+dollar volume, independent minimum42 valid observations,63-session listing age,
+permanent-ID tie-breaking and entry/retention hysteresis. First target1100,
+desired band900-1300; new-entry rank1000, retain to1300, top up to1100 when below900.
+Never change membership based on signal/outcome or risk coverage. Held nonmembers
+remain account/risk obligations. No filter on future survival, returns or labels.
+
+The active long-history policy in configs/us-large-cap-universe.json uses entry
+$500m cap/$5m median dollar volume/$5 raw price; retention$400m/$2.5m/$3. Largest
+smoothed capitalization ranks determine the final population. These absolute
+floors support older nominal-dollar markets; the desired population remains a
+large-cap size-ranked universe. The earlier inactive proposed config is preserved.
+Current domestic/primary/exchange/SIC metadata is a provisional historical backcast.
+Issuer/class switches and dated historical eligibility are not independently
+attested. Ambiguous identities are recorded/excluded; no current-survivor screen.
+Snapshot decision/effective times, membership reasons, source/policy hashes and
+previous-snapshot linkage are saved. This is not actual Russell1000 membership.
+
+Inputs and availability
+------------------------
+Extended bundles end strictly before2023. Existing Sharadar snapshots are first;
+Tiingo/Arrays priority is unchanged. Source hashes and every prepared artifact
+are verified. Official XNYS sessions and benchmark must be complete. Missing
+quotes/returns remain missing. No pandas forward fill of returns or rolling
+observed-row substitution across calendar gaps. Raw volume uses invariant dollar
+volume; price-specific ratios have their stated raw/split/total-return bases.
+
+ART/ARQ financials use declared filing+2 calendar-day availability. Current reports
+have a550-day stale limit. An old amendment cannot displace a newer fiscal period.
+Lagged values match standardized fiscal quarter and latest known vintage; their
+intentional historical age does not itself make them stale. Quarterly NI/asset
+and NI/equity denominators use the previous quarter. Missing input components,
+including R&D, remain missing rather than assumed zero. USD conversions use each
+report's own source FX. These are source-snapshot assumptions, not archived arrivals.
+
+Construction and risk
+-----------------------
+Within current-backcast SIC2 industry, rank signed raw values with average ties,
+center/population-standardize, then jointly remove industry intercept and SPY
+market beta. Require20 usable names in an industry; constant/too-small/invalid
+groups produce zero factor weight with explicit coverage. No silent global-rank
+fallback and no dropped universe member. Recheck dollar/beta equations after
+construction. Scale each ideal factor to10% annual ex-ante volatility. These are
+uncapped analytical directions, NOT executable stock holdings.
+
+The local causal risk estimator uses trailing252 daily total returns, min126
+valid paired observations, SPY market beta/covariance plus residual covariance
+with30% diagonal shrinkage and positive specific variance floor. It stores B,d
+such that Sigma=B'B+diag(d), which is PSD under missing overlap. Missing residuals
+are zero only inside the covariance estimator with per-series observed-count
+normalization; they are NEVER zero realized P&L observations. Market proxy and
+imperfect overlap remain limitations. Risk is refreshed at formations and applied
+to current daily marked holdings. This is a separately versioned local estimator;
+the single-date2026 equity-risk export is not used in historical calculations.
+
+Factors are equal-weighted within their official themes; theme portfolios are
+risk-scaled, equal-weighted across active themes, and the final ideal model has
+its own10% annual volatility target. Every unavailable/zero leaf and theme is
+reported. No factor is selected or removed for its future performance. The JKP
+catalog was published/updated after much of the requested history: this is an
+academic backcast, not historically available research or a fresh holdout.
+
+Expected returns and optimizer
+--------------------------------
+An explicit unconstrained reverse-optimization prior maps ideal model holdings:
+  mu_horizon = gamma * horizon_sessions * Sigma_daily * w_ideal_model
+Gamma is intentionally chosen in each registered policy, not inferred from ranks
+or actual future returns. Gamma5 at ideal10% annual vol implies a0.5 prior annual
+Sharpe under that unconstrained model. This is not evidence of expected alpha.
+Constraints would introduce shadow-price/KKT terms; no unique inversion is claimed.
+
+The sparse conic optimizer maximizes horizon expected return after one-way trade
+and hypothetical stock-borrow costs. Industry dollar/beta neutrality, forecast
+risk, turnover, gross/name limits, and reduce-only nonmembers are explicit. It
+handles up to2500 ordered securities, including held-only names; no change to the
+old512-name reference solver. Solutions require Solved and independent checks;
+no silent fallback or relaxed solution. Numerical weights below1e-10 are set to
+zero BEFORE final constraint checks. Monthly files include B,d,beta and all raw,
+factor/model/forecast/implementation holdings, enabling independent reconstruction.
+
+Account diagnostic and limitations
+-----------------------------------
+Fixed total-return units sized at decision close execute at next official close.
+Units are analytical claims on vendor total-return indices, not literal shares.
+The vendor's adjusted-price reinvestment, including stock distributions, differs
+from physical dividend/stock delivery, financing and fractional settlement.
+Use the raw-share ledger for separately evidenced action/settlement execution.
+
+The fixed diagnostic convention uses$1m,1bp commission+5bp slippage one-way,
+1% dollar-volume participation, hypothetical unlimited3% annual borrow,ACT365F,
+zero cash credit/5% debit. Monthly optimized targets use inner gross80%/name4%/
+turnover180%. Original hard gross100%/name5%/turnover200%/abs net1%/abs beta0.01
+remain. Additional industry abs net/beta caps are0.005 and forecast vol cap10%.
+Exposure violations trigger next-close uniform reductions, with inner industry
+0.0025 and vol9%; explicit final zero closing takes priority. Gaps, partial fills
+and reduction-only residual violations are visible, not guaranteed away.
+
+Missing held prices are never executable stale exits: retain the units, mark
+known components provisionally, censor observed NAV and block new sizing. Actual
+observed return is absent across missing intervals. Full-path performance is
+absent if the path is incomplete. Ideal factor/model forward-interval diagnostics
+separately require all held interval marks; missing outcomes retain their footprint.
+Never compound only the surviving intervals as a full-history return. Cash-only
+or rejected-fill results are not evidence of alpha. Actual borrow/market impact,
+historical metadata/revisions and terminal/action economics still need evidence.
+
+Local commands
+----------------
+  python -m alpha_lab.research.cli factor-platform-catalog
+  python -m alpha_lab.research.cli factor-platform-prepare --sources SOURCES.json --universe-policy configs/us-large-cap-universe.json --output NEW_INPUTS
+  python -m alpha_lab.research.cli factor-platform-spec --inputs INPUTS --fundamentals INPUTS/fundamentals.parquet --policy POLICY.json --request REQUEST.json --output SPEC.json
+  python -m alpha_lab.research.cli factor-platform-register --inputs INPUTS --fundamentals INPUTS/fundamentals.parquet --spec SPEC.json --registry LEDGER.sqlite --family FAMILY.json --hypothesis HYPOTHESIS.json
+  python -m alpha_lab.research.cli factor-platform-run --inputs INPUTS --fundamentals INPUTS/fundamentals.parquet --spec SPEC.json --registry LEDGER.sqlite --output NEW_RUN
+  python -m alpha_lab.research.cli factor-platform-inspect NEW_RUN
+  python -m alpha_lab.research.cli factor-platform-reconcile NEW_RUN --registry LEDGER.sqlite
+
+CPU workers own a Windows process job, filter credentials/proxies, fix seeds and
+threads, and enforce wall/output/sampled-RSS caps. This is not filesystem/network
+isolation. Specs bind source/bundle/catalog/feature/implementation/environment,
+policy and limits. SQLite records family/hypothesis/trial/attempt/exposure lineage;
+completion requires verified files and a reconciled completion hash. Saved-run
+inspection and the shared research report service do not start experiments.
+LLM generation is not part of this fixed baseline. Existing public-only design
+tools do not gain licensed data/results access. Original2023-2025 holdout and
+prior experiment artifacts remain unchanged; no real orders are placed.

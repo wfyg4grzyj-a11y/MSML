@@ -6,6 +6,23 @@ from .contracts import ResearchError, parse, read_json
 
 
 def product_commands(commands):
+    commands.add_parser('factor-platform-catalog',help='Public JKP153 catalog, provider reconstruction statuses and missing dependencies')
+    prepare=commands.add_parser('factor-platform-prepare',help='Build an immutable pre-2023 large-cap universe/history bundle')
+    prepare.add_argument('--sources',type=Path,required=True);prepare.add_argument('--output',type=Path,required=True)
+    prepare.add_argument('--start',default='1999-03-31');prepare.add_argument('--end',default='2022-12-30')
+    prepare.add_argument('--universe-policy',type=Path)
+    resolve=commands.add_parser('factor-platform-spec')
+    for name in ('inputs','fundamentals','policy','request','output'):resolve.add_argument('--'+name,type=Path,required=True)
+    for name in ('factor-platform-register','factor-platform-run'):
+        command=commands.add_parser(name)
+        for flag in ('inputs','fundamentals','spec','registry'):command.add_argument('--'+flag,type=Path,required=True)
+        if name.endswith('register'):
+            command.add_argument('--family',type=Path,required=True);command.add_argument('--hypothesis',type=Path,required=True)
+            command.add_argument('--parent')
+        else:command.add_argument('--output',type=Path,required=True);command.add_argument('--retry-of')
+    for name in ('factor-platform-inspect','factor-platform-reconcile'):
+        command=commands.add_parser(name);command.add_argument('directory',type=Path)
+        if name.endswith('reconcile'):command.add_argument('--registry',type=Path,required=True)
     pin_tools=commands.add_parser('risk-tools-pin',help='Pin accepted equity-risk tools inputs and the tested package identity')
     pin_tools.add_argument('--config',type=Path,required=True);pin_tools.add_argument('--output',type=Path,required=True)
     catalog=commands.add_parser('risk-tools-catalog',help='List exact dated covariance models in a pinned local library')
@@ -50,6 +67,29 @@ def product_commands(commands):
 
 
 def product_action(args):
+    if args.command.startswith('factor-platform-'):
+        from .factor_workflow import PlatformSpec,resolve_platform,run_platform,inspect_platform,reconcile_platform,validate_spec
+        from .factor_inputs import prepare_inputs,save_json
+        if args.command=='factor-platform-catalog':
+            from .jkp_signals import catalog
+            return catalog()
+        if args.command=='factor-platform-prepare':
+            from .universes import UniversePolicy
+            value=read_json(args.universe_policy) if args.universe_policy else None
+            policy=parse(UniversePolicy,value.get('universe_policy',value)) if value else None
+            return prepare_inputs(args.sources,args.output,start=args.start,end=args.end,policy=policy)
+        if args.command=='factor-platform-spec':
+            spec=resolve_platform(args.inputs,args.fundamentals,read_json(args.policy),read_json(args.request))
+            save_json(args.output,spec.model_dump());return {'trial_id':spec.semantic_id(),'output':str(args.output)}
+        if args.command=='factor-platform-inspect':return inspect_platform(args.directory)
+        if args.command=='factor-platform-reconcile':return reconcile_platform(args.registry,args.directory)
+        if args.command=='factor-platform-run':return run_platform(args.inputs,args.fundamentals,args.spec,args.output,args.registry,retry_of=args.retry_of)
+        from .registry import Registry
+        from .signal_contracts import Family,Hypothesis
+        spec=parse(PlatformSpec,read_json(args.spec));validate_spec(spec,args.inputs,args.fundamentals)
+        with Registry(args.registry) as registry:
+            trial=registry.register(parse(Family,read_json(args.family)),parse(Hypothesis,read_json(args.hypothesis)),spec,parent=args.parent)
+        return {'registered':trial}
     if args.command.startswith('risk-tools-'):
         from .risk_tools import PortfolioRiskService,inspect_risk_operation,pin_library,save_risk_operation
         if args.command=='risk-tools-pin':return pin_library(args.config,args.output)

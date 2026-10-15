@@ -26,6 +26,9 @@ class ResearchService:
     def inspect(self, name):
         path=self.path(name)
         record=read_json(path/'run.json')
+        if record.get('schema_version')==5 and record.get('kind')=='large_cap_factor_study':
+            from .factor_workflow import inspect_platform
+            return inspect_platform(path)
         if record.get('schema_version')==4 and record.get('kind')=='portfolio_risk_tools':
             from .risk_tools import inspect_risk_operation
             return inspect_risk_operation(path)
@@ -43,7 +46,7 @@ class ResearchService:
     def progress(self, name):
         path=self.path(name)
         record=read_json(path/'run.json')
-        if record.get('schema_version') not in (1,2,3,4) or 'scientific_disposition' not in record:
+        if record.get('schema_version') not in (1,2,3,4,5) or 'scientific_disposition' not in record:
             raise ResearchError('Unsupported progress record')
         return {key:record.get(key) for key in ('status','stage','started_at','updated_at','finished_at',
                 'failure','failure_code','peak_rss_mb','worker_pid','scientific_disposition','llm_calls')}

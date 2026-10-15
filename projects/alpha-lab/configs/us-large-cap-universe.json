@@ -1,0 +1,29 @@
+{
+  "status": "active_for_registered_factor_platform",
+  "policy_id": "us-large-cap-smoothed-v1",
+  "universe_policy": {
+    "methodology": "smoothed_cap_liquidity_hysteresis_v1",
+    "target": 1100,
+    "lower": 900,
+    "upper": 1300,
+    "entry_rank": 1000,
+    "entry_cap": 500000000.0,
+    "entry_dollar_volume": 5000000.0,
+    "entry_price": 5.0,
+    "retention_cap": 400000000.0,
+    "retention_dollar_volume": 2500000.0,
+    "retention_price": 3.0,
+    "observations": 42,
+    "listing_age_sessions": 63
+  },
+  "decision": "month-end close",
+  "effective": "next official session",
+  "industry": "SIC2 current-snapshot backcast; historical evidence unverified",
+  "benchmark": "S&P500 total return; supplied SPY proxy explicitly labeled",
+  "provider_priority": [
+    "Sharadar",
+    "Tiingo_existing_gaps",
+    "Arrays_uncovered_US_equity_only"
+  ],
+  "factor_outcomes_change_membership": false
+}

@@ -124,7 +124,7 @@ def main(argv=None):
     product_commands(commands)
     args = parser.parse_args(argv)
     try:
-        if args.command.startswith(('study-', 'risk-', 'research-', 'evidence-')) or args.command=='public-design':
+        if args.command.startswith(('study-', 'risk-', 'research-', 'evidence-', 'factor-platform-')) or args.command=='public-design':
             from .product_cli import product_action
             result=product_action(args)
         elif args.command.startswith(('signal-', 'registry-')):
