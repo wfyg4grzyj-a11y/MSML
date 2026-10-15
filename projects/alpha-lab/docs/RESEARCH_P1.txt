@@ -1,0 +1,133 @@
+P1: local, development-only US equity research workflow
+======================================================
+
+This is the first implementation of AlphaLab-US-Equity-Redesign-v2.txt. It adds
+strict DataBundle, ResearchSpec and RunRecord contracts around the existing
+MarketNeutralBacktest without changing its economics. It does not add a new
+accounting ledger, strategy search, historical-risk attestation or live trading.
+
+Install/update the editable project with its equity-research dependencies. The
+console entry point is alpha-lab-research; Windows Application Control can block
+its newly generated executable. The tested entry point on this PC is:
+python -m alpha_lab.research.cli [arguments]. No security policy change is needed.
+No command loads .env, creates an LLM provider or starts a model campaign.
+Remove/disable this entry point to roll back; original commands remain available.
+
+Example from the alpha-lab project directory (PowerShell or activated cmd):
+
+python -m alpha_lab.research.cli pin --panel data/market/research/us-equity-panel-v4 --output data/market/research/my-development-bundle --end-date 2022-12-31
+
+python -m alpha_lab.research.cli spec --bundle data/market/research/my-development-bundle --strategy data/research-strategy.example.json --output data/market/research/my-spec.json --hypothesis-id legacy-value --family-id compatibility --title "Legacy value compatibility" --cost-bps 10 --borrow-bps-annual 300 --terminal-stress 0 --seed 20261013 --threads 1 --timeout-seconds 120 --max-output-bytes 8000000 --memory-limit-mb 1024
+
+python -m alpha_lab.research.cli check --bundle data/market/research/my-development-bundle --spec data/market/research/my-spec.json
+
+python -m alpha_lab.research.cli run --bundle data/market/research/my-development-bundle --spec data/market/research/my-spec.json --output data/market/research/my-run
+
+python -m alpha_lab.research.cli inspect data/market/research/my-run
+
+Use fresh output names. Existing runs, specifications and bundles are never
+overwritten or automatically resumed. The numerical/cost/resource values above
+are explicit compatibility examples, not future strategy or LLM defaults.
+
+Contracts and information boundaries
+------------------------------------
+DataBundle pins a hashed schema-4 legacy panel and materializes only development
+observations through at most 2022-12-31. P1 retains the legacy 2014 start and
+train/validation split; general research splits belong to the next milestone.
+Warm-up sessions before 2014 are retained. Securities used only after the cutoff
+are removed. Features, returns, actions and calendar rows are bounded. Every
+retained ticker must map uniquely to a positive Sharadar share-class permaticker;
+this is not proof of dated issuer identity or historical trading eligibility.
+
+The coordinator verifies the source panel and pinned security reference. It
+does not redownload or rehash the entire raw lake. Bounded input files and source
+IDs/hashes are published to a new bundle. Original full-history source paths
+are absent from its sources.json. Actual data dates, dimensions, identities and
+observation masks are checked in addition to hashes. Current reconstruction
+assumptions remain explicit; pinning in 2026 cannot establish past vendor arrival.
+
+ResearchSpec rejects unknown keys, coercion, invalid costs, nonfinite values,
+unsupported methodology and implicit policy switches. The CLI resolves legacy
+timing/universe/feature/cash/risk assumptions into explicit literal fields.
+Implementation and Python/numerical dependency identities are pinned; changed
+code/environment requires a new explicit spec. Its computation ID excludes
+display titles, strategy names and family/hypothesis labels; costs, factors,
+data identity, numerical/resource settings and implementation remain included.
+There is no result cache or automatic cross-run experiment deduplication in P1.
+
+RunRecord separates operational completion from scientific acceptance, records
+stage progress, PID, sampled peak RSS, failure category and exact artifact hashes.
+The scientific status stays provisional_legacy_research_not_accepted. Every
+attempt uses a new directory. Failed/unknown attempts remain evidence; opening
+an inspector never repairs, retries, submits jobs or resets a budget.
+
+Runtime and honest isolation limits
+------------------------------------
+P1 executes a fixed trusted CPU worker, not arbitrary strategy Python. The child
+gets an allowlisted OS environment plus explicit source path, seed, fixed BLAS
+thread controls and disabled CUDA visibility. Provider keys, inherited proxy
+settings, arbitrary PYTHONPATH and user startup settings are excluded. Do not
+put credentials in specification fields or paths.
+
+Existing Windows Job Objects/process groups own the worker process tree. Wall
+time, scientific output/log bytes and sampled aggregate process-tree RSS are
+bounded. RSS sampling is not a hard OS allocation limit; transient peaks can
+occur between samples. Input materialization/inspection is coordinator-side,
+not inside the worker's limits. Use the supplied legacy-sized panels; P1 is not
+an arbitrary-size data service. There is no filesystem ACL or network sandbox.
+A same-user process can discover other files; do not describe this as secure
+holdout isolation. Application restrictions prevent accidental data access via
+this entry point, not arbitrary code with the same Windows privileges.
+
+The general local GPU wrapper also now honors requested Torch/Lightning
+determinism instead of overriding it. Unsupported deterministic operations
+surface their failure. CPU/GPU bitwise agreement across versions/hardware is
+not promised, and this milestone does not claim neural-model reproducibility.
+Environment evidence pins Python/numerical package versions and source hashes;
+it is not a wheel/binary lock or proof of identical BLAS builds on another PC.
+
+Publication, results and recovery
+---------------------------------
+The worker must exit successfully AND produce exactly metrics.json, daily.csv
+and runtime.json. The coordinator verifies policy/identity, finite values, all
+requested result sessions, runtime controls and unchanged inputs/code, then
+publishes a report, reference expectations and a final hashed COMPLETE.json.
+Completion markers are authoritative only after full validation. Partial files,
+missing metrics, interrupted publication and corrupt artifacts cannot be read as
+completed. A missing marker with a last recorded running state is reported as
+unfinished_requires_reconciliation; inspection does not assert the PID is live.
+
+Completed run files: spec.json, bundle.json (contract reference, not input data),
+metrics.json, daily.csv, runtime.json, reference-cases.json, report.txt, run.json,
+COMPLETE.json and the local worker.out diagnostic. The last is a diagnostic log,
+not part of the scientific artifact hash set. Input bundles have their own full
+manifest. A copied run can be inspected without reopening its source raw lake;
+inspection verifies saved evidence, not historical source arrival or economics.
+
+Failures are recorded as input_validation, execution_failure, timeout,
+memory_limit, output_limit, publication_failure or interrupted. Incomplete
+directories are preserved. P1 provides no automatic resume, retry, submission
+recovery or family-wide holdout-consumption ledger. Those remain later work.
+
+Legacy economics and independent expectations
+----------------------------------------------
+The unchanged legacy method ranks the ten existing factors, requires filing
+data even for a price-only factor, projects off intercept/trailing SPY beta,
+caps names by reducing gross, forms monthly signals and maintains targets daily
+after following-close execution. Costs are flat one-way bps, borrow is an
+assumed annual bps/252 sessions, cash/financing is omitted and Sharpe uses zero
+risk-free return. Missing quotes use provisional stale-price exit assumptions.
+The result is research-only with unresolved terminal/action/borrow evidence.
+
+reference-cases.json contains independently hand-derived long/short NAV, split,
+dividend receivable/payable, transaction cost, hypothetical weekend accrual and
+unknown-terminal expectations. These are P3 acceptance specifications, not a
+new ledger implementation or a claim that the legacy engine passed those cases.
+Do not double-count dividends by adding explicit payments to an already adjusted
+total-return series in a future ledger. Legacy parity is a compatibility gate;
+independent economic correctness and strategy validity remain distinct gates.
+
+No original 2023-2025 holdout evaluation is available from this CLI. No private
+results are sent to the model gateway. Arrays routing and equity-risk ownership
+remain unchanged. Further data preparation, features/labels/folds, risk integration,
+new accounting and a genuinely unseen research study remain later milestones.
