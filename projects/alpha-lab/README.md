@@ -11,6 +11,7 @@ no LLM connection. The optional public recipe designer requires intentionally
 selected model, reasoning, budgets and a UTC deadline.
 
 - [Accounting, risk and product guide](docs/RESEARCH_P3_P4.txt)
+- [Local portfolio risk tools and model setup](docs/RISK_TOOLS.txt)
 - [Signal laboratory guide](docs/RESEARCH_P2.txt)
 - [Legacy compatibility guide](docs/RESEARCH_P1.txt)
 - [Read-only research notebook](notebooks/us_equity_research.ipynb)
@@ -21,6 +22,13 @@ data/market/research` and is available at `http://127.0.0.1:8766/research`. View
 saved research starts no experiments or model requests. Results remain
 provisional: historical data, borrow and terminal-outcome evidence require
 separate review; engineering completion does not establish an investable edge.
+
+The equity-risk project's three models are also available through the local
+`risk-tools-*` commands and `ResearchService.risk(...)`: portfolio volatility,
+attribution, exposures, trade impact and constrained research targets. The pinned
+October 12, 2026 library covers 944 securities with 1/5/21-session horizons.
+Dates and covered identities must match exactly. This research-only export is
+separate from the attested historical-backtest contract and the public LLM tools.
 
 ## Upstream AlphaLab reference
 

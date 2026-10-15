@@ -26,6 +26,9 @@ class ResearchService:
     def inspect(self, name):
         path=self.path(name)
         record=read_json(path/'run.json')
+        if record.get('schema_version')==4 and record.get('kind')=='portfolio_risk_tools':
+            from .risk_tools import inspect_risk_operation
+            return inspect_risk_operation(path)
         if record.get('schema_version')==3:
             from .study_workflow import inspect_study
             return inspect_study(path)
@@ -40,7 +43,7 @@ class ResearchService:
     def progress(self, name):
         path=self.path(name)
         record=read_json(path/'run.json')
-        if record.get('schema_version') not in (1,2,3) or 'scientific_disposition' not in record:
+        if record.get('schema_version') not in (1,2,3,4) or 'scientific_disposition' not in record:
             raise ResearchError('Unsupported progress record')
         return {key:record.get(key) for key in ('status','stage','started_at','updated_at','finished_at',
                 'failure','failure_code','peak_rss_mb','worker_pid','scientific_disposition','llm_calls')}
@@ -83,3 +86,8 @@ class ResearchService:
     def compare_signals(self,names):
         from .signal_workflow import compare_signals
         return compare_signals([self.path(name) for name in names])
+
+    def risk(self,library):
+        """Explicit local analytics, independent of public-only LLM proposal tools."""
+        from .risk_tools import PortfolioRiskService
+        return PortfolioRiskService(library)

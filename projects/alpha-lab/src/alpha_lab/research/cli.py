@@ -153,6 +153,8 @@ def main(argv=None):
         else:
             result = inspect_run(args.directory)
         print(json.dumps(result, indent=2, allow_nan=False))
+        if args.command=='risk-tools-query' and result.get('status')=='rejected':
+            return 2
         return 0
     except ResearchError as error:
         print(str(error), file=sys.stderr)

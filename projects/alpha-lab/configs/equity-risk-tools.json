@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "default_model": "market",
+  "exports": ["../../equity-risk/outputs/latest-broad-2026-10-12-v7"],
+  "research_runs": [],
+  "cache_size": 6
+}

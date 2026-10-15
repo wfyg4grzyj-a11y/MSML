@@ -1,0 +1,156 @@
+ALPHALAB LOCAL PORTFOLIO RISK
+
+The separate equity-risk project's tested 0.2.0 wheel is now an optional AlphaLab
+dependency. It reads numerically accepted forecasts; it does not fit a model,
+start a campaign, contact a data API, or submit orders. AlphaLab keeps a pinned
+copy of the forecast inputs rather than depending on a moving producer folder.
+The producer remains read-only.
+
+CURRENT LOCAL SETUP
+
+Python: C:/Users/jerry/Prisma/.venv/Scripts/python.exe
+Source registry: configs/equity-risk-tools.json
+Pinned library: data/market/risk/equity-risk-2026-10-12-v7
+Exact saved date: 2026-10-12; 944 covered permanent security IDs.
+Models: market (configured default), fundamental, direct; horizons: 1, 5, 21
+trading sessions. All three are available; no model has been selected by returns.
+The registry default is a routing choice, not a preference established by testing.
+
+INSTALL AND PIN ON ANOTHER CHECKOUT
+
+Run from projects/alpha-lab. Replace the Python path if using another environment.
+The wheel is a local sibling-project delivery, not a public registry download.
+
+  $python = 'C:/Users/jerry/Prisma/.venv/Scripts/python.exe'
+  & $python -m pip install --no-index --no-deps ../equity-risk/outputs/dist-tools2/prisma_equity_risk-0.2.0-py3-none-any.whl
+  & $python -m alpha_lab.research.cli risk-tools-pin --config configs/equity-risk-tools.json --output data/market/risk/equity-risk-2026-10-12-v7
+
+Install the ordinary equity-research dependencies first. The risk-tools optional
+extra declares the wheel dependency for packaging. No Torch/research extras from
+the producer are required for portfolio queries. Use python -m rather than the
+generated Windows launcher if Application Control blocks that launcher.
+
+Pinning checks every configured snapshot, copied covariance, mapping and numerical
+acceptance before writing COMPLETE.json. Only documented forecast inputs are
+copied. The lock records source/config/file hashes and installed package source
+and NumPy identity. Each service call rechecks all pinned bytes and runtime before
+and after using the producer's cache. An upgrade requires a new library. A pin
+failure leaves an incomplete directory for diagnosis; choose a fresh destination.
+The limits are 512 model/date snapshots, 4096 files, 2 GB per pinned library.
+
+QUERY AND INSPECT
+
+  & $python -m alpha_lab.research.cli risk-tools-catalog --library data/market/risk/equity-risk-2026-10-12-v7
+  & $python -m alpha_lab.research.cli risk-tools-query --library data/market/risk/equity-risk-2026-10-12-v7 --request examples/research/risk-portfolio-query.json --output data/market/research/my-risk-query-v1
+  & $python -m alpha_lab.research.cli risk-tools-inspect data/market/research/my-risk-query-v1
+
+The sample is an illustrative four-stock dollar-neutral portfolio, not a strategy
+recommendation. Request files contain exactly {"tool": ..., "arguments": {...}}.
+Use risk.schemas in Python to inspect all strict function schemas. A valid query
+that is unavailable/rejected is saved as rejected, with CLI exit code 2. Invalid
+configuration/JSON fails before saving. Destinations never overwrite prior runs.
+Saved requests, responses, package/code/environment identity, source inventory and
+report have a hash-checked completion marker. Offline inspection needs neither
+the current risk package nor the producer/library. It proves archive integrity,
+not investment acceptance. Reports are listed by the existing read-only dashboard.
+
+Available local functions:
+  risk_catalog, risk_universe, risk_portfolio, risk_contributions,
+  risk_portfolio_correlations, risk_security_matrices, risk_exposures,
+  risk_security_exposures, risk_trade_impact, risk_hedge, risk_scale,
+  risk_compare_models.
+
+These cover variance/volatility, explicit-benchmark beta/tracking error, signed
+Euler attribution, stock/portfolio covariance and correlation, style/native/SIC
+exposures, exact trade-risk change, mathematical hedges and uniform risk scaling.
+The latter two do not impose mandates or execute orders. No tools were added to
+the public-only LLM designer; licensed portfolios/results stay local. The service
+implements AlphaLab's callable executor convention for an explicitly authorized
+future local analysis context, without registering itself in any remote agent.
+
+PYTHON / NOTEBOOK API
+
+  from alpha_lab.research.service import ResearchService
+  research = ResearchService('data/market/research')
+  risk = research.risk('data/market/risk/equity-risk-2026-10-12-v7')
+  risk.catalog()
+  response = risk.invoke('risk_portfolio', {
+      'as_of': '2026-10-12', 'positions': [{'security': 'NVDA', 'weight': 0.25}],
+      'model': 'direct', 'horizon': 21, 'identifier': 'ticker', 'benchmark': None})
+  covariance, metadata = risk.covariance(as_of='2026-10-12', model='direct',
+      horizon=21, security_ids=['196754', '199059'])
+
+Permanent IDs are Sharadar share-class permatickers. Tickers resolve only through
+the export's dated mapping. Weights are signed NAV fractions and never normalized;
+cash is outside the equity covariance. Unknown names (even zero-weight names),
+duplicate IDs/aliases, missing dates and unsupported horizons are errors. Matrix
+requests return exactly the supplied permanent-ID order, read-only float64. Local
+Python matrix/projection requests support up to 512 names; function schemas cap
+matrix/exposure requests at 25. Nothing silently drops uncovered held positions.
+
+CONSTRAINED PORTFOLIO CONSTRUCTION
+
+risk.project(request) and CLI risk-tools-project --library ... --request ...
+--output ... use the saved covariance inside AlphaLab's existing score projection.
+This is a one-decision research calculation, not a historical study or execution.
+All request fields are required; see RiskProjection in research/risk_tools.py:
+
+  as_of, model, decision_time, available_at, availability_kind,
+  availability_evidence_sha256, max_age_calendar_days,
+  benchmark_id, cash_id, calendar_id, beta_evidence_sha256, nav_usd,
+  positions (PositionInput list), policy (PortfolioPolicy object).
+
+Supply complete held/candidate positions, raw prices, scores, eligibility, trading
+state, beta and optional issuer/sector evidence, and current locate quantities.
+These are caller-supplied dated research inputs, not inferred from the forecast.
+The saved risk's named data bindings must match exactly. Availability must be
+after the modeled XNYS close and no later than the decision; future/stale forecasts
+are rejected. An explicit declared availability assumption is allowed for this
+research-only API and recorded. An evidence hash is a reference, not an attestation.
+Scores remain unitless; no expected-return forecasts are invented.
+
+Gross/name/issuer/sector/net/beta/turnover/borrow bounds, frozen positions and
+coverage failures retain the existing optimizer's behavior. Missing beta fails;
+unknown borrow prevents new shorts. No diagonal/model/date fallback or unsupported
+horizon scaling occurs. Each result carries source metadata and investment_ready
+false, even when numerical optimization succeeds. Price/beta/borrow availability
+and mandate adequacy remain the caller's responsibility. Fees/cash/actions/fills
+still belong to the accounting ledger, not these risk calculations.
+
+The existing risk-pin/risk-check and StudyPacket equity_risk_forecast path retain
+their stricter historical/PIT requirements. This October 2026 export cannot be
+used in 2014-2022 development backtests. No old holdout is reopened. To add usable
+historical forecasts, obtain accepted dated artifacts and independently document
+their availability/calibration/data binding, then pin a new library; to use the
+attested historical study path, satisfy that path's separate data requirements.
+
+The completed local integration example is in
+data/market/research/risk-tools-integration-v1/projection-request.json, with its
+explicit artificial-price/hypothetical-locate declaration in
+projection-assumptions.json and the saved result in projection-check. It is an
+example of request structure and constraints, not observed execution evidence.
+
+INTERPRETATION AND LIMITS
+
+Covariance uses squared decimal cumulative additive excess returns. Annualized
+equivalent volatility = horizon volatility * sqrt(252 / sessions), not a one-year
+forecast. Signed contributions may be negative. Zero-denominator statistics are
+null. Styles use the fundamental snapshot's dated standardized basis; direct
+covariance has no fabricated native factors. Raw market beta differs from the
+fundamental model's standardized beta style. Comparisons do not select a winner.
+Benchmarks must be explicit weights in covered equities: no synthesized SPY or
+S&P 500 holdings. No implicit rebasing of differing benchmark/cash/calendar data.
+
+Current numerical acceptance covers computation, not historical point-in-time,
+survivorship, terminal economic outcomes or broker-lending evidence. The saved
+models remain research_only=true. They omit cash-rate, financing, borrow,
+execution, option and other non-equity risks. The market-data pipeline's provider
+priorities and all existing data-evidence queues remain unchanged.
+
+FUNCTIONAL VERIFICATION
+
+  & $python -B examples/research/verify_risk_tools.py --library data/market/risk/equity-risk-2026-10-12-v7 --as-of 2026-10-12 --output data/market/research/new-risk-tools-check
+
+This checks all 12 operations, three models and three horizons against saved
+forecasts, reconciles attribution, matrix ordering and trade interaction, and
+preserves individual local reports. It is not strategy selection or a backtest.

@@ -6,6 +6,15 @@ from .contracts import ResearchError, parse, read_json
 
 
 def product_commands(commands):
+    pin_tools=commands.add_parser('risk-tools-pin',help='Pin accepted equity-risk tools inputs and the tested package identity')
+    pin_tools.add_argument('--config',type=Path,required=True);pin_tools.add_argument('--output',type=Path,required=True)
+    catalog=commands.add_parser('risk-tools-catalog',help='List exact dated covariance models in a pinned local library')
+    catalog.add_argument('--library',type=Path,required=True)
+    for name in ('risk-tools-query','risk-tools-project'):
+        tool=commands.add_parser(name,help='Save local risk analytics or constrained research targets; no LLM or orders')
+        tool.add_argument('--library',type=Path,required=True);tool.add_argument('--request',type=Path,required=True);tool.add_argument('--output',type=Path,required=True)
+    inspect_tools=commands.add_parser('risk-tools-inspect',help='Verify a saved local risk operation without loading a model')
+    inspect_tools.add_argument('directory',type=Path)
     pin=commands.add_parser('study-pin',help='Pin bounded raw-accounting inputs and explicit risk bindings')
     pin.add_argument('--packet',type=Path,required=True);pin.add_argument('--output',type=Path,required=True)
     pin.add_argument('--risk-sources',type=Path,help='JSON mapping binding IDs to already pinned risk directories')
@@ -41,6 +50,12 @@ def product_commands(commands):
 
 
 def product_action(args):
+    if args.command.startswith('risk-tools-'):
+        from .risk_tools import PortfolioRiskService,inspect_risk_operation,pin_library,save_risk_operation
+        if args.command=='risk-tools-pin':return pin_library(args.config,args.output)
+        if args.command=='risk-tools-catalog':return PortfolioRiskService(args.library).catalog()
+        if args.command=='risk-tools-inspect':return inspect_risk_operation(args.directory)
+        return save_risk_operation(args.library,args.request,args.output,projection=args.command=='risk-tools-project')
     if args.command=='study-from-signal':
         from .signal_adapter import packet_from_signal
         return packet_from_signal(args.signal_run,args.development_bundle,args.template,args.output)

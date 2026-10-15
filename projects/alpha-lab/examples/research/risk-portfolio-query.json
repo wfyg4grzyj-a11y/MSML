@@ -1,0 +1,16 @@
+{
+  "tool": "risk_portfolio",
+  "arguments": {
+    "as_of": "2026-10-12",
+    "positions": [
+      {"security": "NVDA", "weight": 0.25},
+      {"security": "AAPL", "weight": -0.25},
+      {"security": "MSFT", "weight": 0.25},
+      {"security": "AMZN", "weight": -0.25}
+    ],
+    "model": "market",
+    "horizon": 21,
+    "identifier": "ticker",
+    "benchmark": null
+  }
+}
