@@ -286,6 +286,7 @@ _runtime_active = False
 
 # Set by serve_main.
 _workspace: str = ""
+_research_root: str | None = None
 _adapter_cache: dict = {}  # {"adapter": DomainAdapter | None}
 _chat_config_path: Path | None = None
 _chat_session: Any = None
@@ -891,6 +892,9 @@ async def chat_query(request: Request) -> JSONResponse:
 # Static files (must be last)
 # ---------------------------------------------------------------------------
 
+from alpha_lab.research.web import research_router
+app.include_router(research_router(lambda: _research_root or _workspace))
+
 _frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
 if _frontend_dist.exists():
     app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="frontend")
@@ -923,6 +927,7 @@ def serve_main() -> None:
         type=Path,
         help="Optional explicit public-question chat controls; disabled when omitted",
     )
+    parser.add_argument('--research-root',type=Path,help='Optional saved US equity study library for /research')
     parser.add_argument(
         "--port",
         type=int,
@@ -937,9 +942,10 @@ def serve_main() -> None:
     )
     args = parser.parse_args()
 
-    global _workspace, _chat_config_path
+    global _workspace, _chat_config_path, _research_root
     _workspace = os.path.abspath(args.workspace)
     _chat_config_path = args.chat_config.resolve() if args.chat_config else None
+    _research_root = str(args.research_root.resolve()) if args.research_root else None
     manager.workspace = _workspace
 
     print(f"Workspace: {_workspace}")

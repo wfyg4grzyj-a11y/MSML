@@ -1,0 +1,10 @@
+{
+  "hypothesis_id": "raw-ledger-reference-v1",
+  "family_id": "raw-ledger-reference-v1",
+  "premise": "Cash, shares, fees, borrow and raw marks reconcile through a prespecified neutral round trip. Synthetic evidence validates software only.",
+  "tests": [
+    "NAV components reconcile with signed trade costs and calendar-day charges",
+    "Decision-time scores and prices produce fixed later-close share orders",
+    "Targets and retained positions preserve coverage and explicit constraint failures"
+  ]
+}

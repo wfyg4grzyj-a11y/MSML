@@ -1,9 +1,9 @@
-"""Independent hand-derived expectations; P1 does not implement a share ledger."""
+"""Independent expectations; legacy verification and P3 ledger tests are separate."""
 
 
 def accounting_reference():
     return {
-        'status': 'reference_expectations_only_new_ledger_deferred_to_P3',
+        'status': 'legacy_reference_expectations_only_see_P3_for_raw_ledger_validation',
         'legacy_accounting_verified': False,
         'cases': [
             {'case': 'long_purchase', 'initial_cash_usd': 1000, 'shares': 10, 'price_usd': 100,
@@ -36,7 +36,7 @@ def accounting_reference():
             'Price-only signals inherit the legacy filing-data requirement',
             'Current corrected history and static eligibility are not attested historical feed replay',
         ],
-        'pending_P3_cases': ['Partial/unfilled orders', 'Dividend entitlement boundaries',
+        'additional_raw_ledger_reference_cases': ['Partial/unfilled orders', 'Dividend entitlement boundaries',
                              'Cash/stock merger delivery', 'Stale quote recovery',
                              'Issuer/class concentration', 'Infeasible risk/borrow constraints'],
     }

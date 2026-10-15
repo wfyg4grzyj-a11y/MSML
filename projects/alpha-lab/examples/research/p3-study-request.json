@@ -1,0 +1,10 @@
+{
+  "family_id": "raw-ledger-reference-v1",
+  "hypothesis_id": "raw-ledger-reference-v1",
+  "title": "Raw-share accounting and portfolio integration reference",
+  "seed": 42,
+  "threads": 1,
+  "timeout_seconds": 60,
+  "max_output_bytes": 10000000,
+  "memory_limit_mb": 1024
+}

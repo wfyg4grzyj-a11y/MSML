@@ -1,0 +1,18 @@
+{
+  "data_scope": "public_only",
+  "base_url": "https://ai-gateway.stg.alva.xyz/v1",
+  "max_drafts": 1,
+  "llm": {
+    "model": null,
+    "reasoning_effort": null,
+    "max_output_tokens": 1000,
+    "max_calls": 4,
+    "max_reserved_tokens": 40000,
+    "max_run_seconds": 120,
+    "max_request_seconds": 45,
+    "read_timeout_seconds": 30,
+    "max_context_bytes": 16000,
+    "verbosity": "low",
+    "deadline_utc": null
+  }
+}

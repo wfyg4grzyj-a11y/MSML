@@ -130,7 +130,7 @@ def _report(record, spec, bundle, result, rows):
             'No historical eligibility, arrival, terminal settlement or borrow attestation is supplied.\n\n'
             'Legacy assumptions and limitations:\n' + ''.join('- '+s+'\n' for s in reference['legacy_limitations']) +
             '\nIndependent accounting expectations are in reference-cases.json. They are specifications;\n'
-            'the new share/cash/action ledger is deferred to P3 and has NOT passed those cases.\n\n'
+            'this legacy workflow does not execute the raw-share ledger. P3 validation is recorded separately.\n\n'
             'Development metrics (legacy definitions):\n' +
             json.dumps({k: result[k] for k in ('train', 'validation') if k in result}, indent=2) + '\n')
 

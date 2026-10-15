@@ -1,0 +1,293 @@
+US equity research: P3 accounting/risk and P4 research product
+=============================================================
+
+Standard workflow
+-----------------
+Use the fixed research API and workers for US equity studies:
+  C:\Users\jerry\Prisma\.venv\Scripts\python.exe -m alpha_lab.research.cli --help
+The generic evaluator-generation/agent pipeline remains a legacy path. It is
+not part of this equity workflow. P1 legacy accounting and P2 signal diagnostics
+remain inspectable under their original methodology; their results are not
+rewritten or pooled with the new raw-share ledger.
+
+The engineering milestones implement a provisional research environment.
+Research acceptance, genuine forward/unexamined testing, historical-data evidence
+and executable brokerage feasibility remain separate decisions. The original
+2023-2025 holdout was already observed; do not repeat it or tune against it.
+
+P3 accounting conventions
+-------------------------
+methodology = raw_share_cash_action_ledger_v1
+Inputs are unadjusted USD/share closing prices and explicit share/action terms.
+Adjusted-price total returns are restricted to labels/diagnostics and are never
+also credited as ledger returns. Quote basis and source history are declared in
+strict typed inputs. A source declaration is not independent historical proof.
+
+An initial session establishes the opening marked account. Economic actions
+start on later sessions. Every modeled XNYS session, including early closes,
+must be present with its exact UTC close. Information times normalize to UTC.
+Decision inputs must be known by the decision close. A decision fixes target
+shares; fills occur at least one later session close. Fill-day prices cannot
+redesign earlier quantities. Splits adjust pending decision-share targets.
+
+Each session: accrue the previous interval's cash/funding/borrow; process splits
+and prior-close action entitlements, then scheduled payments/delivery; update
+raw marks; assess and fill the scheduled batch; record balances and actual
+risk/constraint coverage; form new decision-close orders. Orders have day time
+in force, partial remainders expire, and a later decision cancels/replaces a
+pending same-security target, including when the replacement is right-censored.
+
+Fills use raw close plus signed explicit slippage and absolute-notional
+commission. Participation limits use that session's supplied share volume. A
+research order can contain fractional shares; lot rounding and cash-in-lieu
+broker rules are not inferred. Arithmetic uses Python/NumPy/SciPy float64 under
+the versioned methodology, with seed and fixed threads in the resolved spec.
+A quote can mark a halt without being tradable. Missing quotes never execute at a
+stale mark. A deficient locate or partial leg can reject an entire integrated
+batch if the remaining fills would breach its declared constraints; no hidden
+resizing, liquidation, relaxation or repaired neutral portfolio is inserted.
+Reductions of existing exposure can retain named pre-existing violations, which
+remain visible. Cash-debit restrictions still apply. This is a research fill
+model, not an exchange/broker execution or market-impact model.
+
+Account state contains USD cash, raw shares and signed cash/stock entitlements.
+Short proceeds are offset by the marked short liability. Short proceeds and
+pending signed liabilities are reserved from interest-bearing cash; no rebate
+is assumed. T0 research settlement is an explicit simplification, not broker
+settlement. Credit/debit rates are scenario inputs. ACT365F or ACT360 accrues
+actual intervening calendar days on prior-close balances, including weekends.
+
+Dividends use shares held before ex-session orders, including signed short
+payables. Payment moves a claim to cash without another profit. Splits adjust
+shares and marks inversely. Cash, stock and mixed mergers require a single
+verified package with per-share USD cash, stock ratio/recipient and scheduled
+payment/delivery; no market-cap amount is interpreted as per-share proceeds.
+Stock consideration remains a signed claim until delivery. An unknown nonterminal
+distribution retains the parent shares with an unpriced entitlement and does
+not assert a delisting. Recipient splits
+adjust outstanding share claims. Unsettled dividend rights and financing of
+undelivered short-stock claims remain unpriced when their terms are unknown.
+Payment dates within the supplied window must be sessions: weekend cash flows
+cannot be silently approximated. Extend the event model with separate timing
+evidence before claiming actual non-session cash accrual.
+
+Loan observations record when known, expiry, available shares, annual fee and
+evidence reference. The latest known observation controls; expiration never
+falls back to an older observation. New shorts need decision-known availability
+covering the fill and a current fill-time check. Recalls/expiry can block fills
+without changing decision quantities. Missing held-position fees remain unpriced
+and suppress observed NAV/returns; closing the position does not erase an old
+unpriced cost. The explicit_hypothetical policy instead uses a deliberately
+declared fee/capacity assumption and remains provisional. FINRA short interest
+is not lending evidence.
+
+Stale raw marks are retained only as provisional valuation estimates, with
+unresolved quantities visible. A never-marked received security has no numeric
+NAV estimate; known_components_nav_usd is only a subtotal, not an assumed zero
+liquidation. Economic terminal uncertainty never creates cash proceeds. Quote
+recovery can restore an endpoint valuation; no gap-spanning price move becomes
+a one-day observed return. A missing prior/current valuation or cumulative
+unpriced cost suppresses observed daily returns.
+
+NAV changes reconcile to cash interest, funding, borrow, action changes, raw
+mark changes and signed trade costs at an explicit USD tolerance. Component
+changes during missing valuations explain known subtotals only; they are not
+fully observed economic P&L. Producer audit completion, actual valuation coverage
+and economic resolution are reported separately. False input attestations are
+never upgraded by a successful calculation. investment_ready remains false.
+
+Risk boundary and portfolios
+----------------------------
+risk_adapter.py reads the sibling equity-risk Forecast.save() format:
+forecast.json and forecast.npz. It does not import or modify the sibling project.
+Pin the files with an explicit RiskBinding: interface-document hash, source
+policy, benchmark/cash/calendar IDs, stable share-class namespace/order, training
+cutoff, availability time/kind/evidence, source history and producer attestations.
+
+The adapter checks numeric arrays without pickle, covariance shape/symmetry/PSD,
+units=squared_decimal_return and target=additive_excess_returns. Consumer use
+specifies the exact security order, horizon and maximum age. Wrong/extra/missing
+held names, units, versions, stale/future availability or future calibration fail.
+There is no implicit reorder, horizon scaling or conversion to compounded total
+return uncertainty. Real artifacts require matching producer data_provenance,
+PIT/audit attestations, calibration/selection cutoff and archived availability.
+Those attestations remain producer responsibilities; hashes preserve their
+claim but do not prove unavailable historical facts. Synthetic artifacts can
+only be used as synthetic_validation, never promoted to attested_research.
+An explicit one-session diagonal variance baseline supports software testing
+while real risk evidence remains unavailable; it is not a fitted equity model.
+
+The bounded reference projection uses unitless scores, not expected-return
+forecasts. A net/beta projection supplies a target, then a constrained quadratic
+objective balances distance to that target and a declared covariance penalty.
+Constraints cover actual gross/net/beta/name, confirmed issuer gross, sector net,
+turnover, eligibility, tradability and short capacity. Absolute-value epigraphs
+enforce gross and turnover without approximate signs. Source coverage and held
+coverage differ; ineligible/untradable positions are retained in inputs and
+checked, not erased. Missing issuer/sector/beta/valuation evidence fails when
+the selected policy needs it. Incumbent shorts without a current locate remain
+visible and cannot increase. No automatic fallback or parameter relaxation.
+
+Solver limits, iterations and numerical tolerances are explicit. The reference
+implementation caps active/frozen positions at a selected limit <=512 and
+never truncates a population automatically. Broader fixed forecast coverage can
+include inactive names whose constraints require exactly zero weight; their
+zero variables can be omitted from the solve, with IDs/order retained explicitly
+in the expanded target and risk checks. Every held name remains active/covered.
+Larger/optimized execution remains
+an extension requiring measured resources and parity. Zero targets, infeasible
+constraints and missing evidence are distinct outcomes. Next-close drift or
+partial fills can violate a decision-time target; batch admission checks that
+outcome, and post-fill reports check actual retained positions every session.
+
+Pin/check/register/run/inspect
+-----------------------------
+From the repository root, set $py to the environment Python and choose a NEW $out
+directory, such as data/market/research/my-reviewed-study. The published example
+is entirely synthetic, with deliberate capital, cost, borrow, timing and solver
+settings; it validates integration rather than claiming alpha.
+
+  & $py -m alpha_lab.research.cli study-pin `
+      --packet examples/research/p3-study-packet.json --output "$out/inputs"
+  & $py -m alpha_lab.research.cli study-spec --bundle "$out/inputs" `
+      --request examples/research/p3-study-request.json --output "$out/spec.json"
+  & $py -m alpha_lab.research.cli registry-init "$out/registry.sqlite"
+  & $py -m alpha_lab.research.cli study-register --bundle "$out/inputs" `
+      --spec "$out/spec.json" --registry "$out/registry.sqlite" `
+      --family examples/research/p3-family.json --hypothesis examples/research/p3-hypothesis.json
+  & $py -m alpha_lab.research.cli study-check --bundle "$out/inputs" --spec "$out/spec.json"
+  & $py -m alpha_lab.research.cli study-run --bundle "$out/inputs" `
+      --spec "$out/spec.json" --registry "$out/registry.sqlite" --output "$out/run"
+  & $py -m alpha_lab.research.cli study-inspect "$out/run"
+
+Use a single project registry for related actual research, with explicit parent
+links and prior exposure declarations. The separate new registry in this example
+is for the self-contained synthetic fixture, not a reset of research knowledge.
+Study identities include the exact economic input packet and pinned forecast
+files, code, environment (including SciPy), seed and threads. Names/resource-only
+settings do not reset a trial. Family/attempt caps and explicit --retry-of use
+the existing project ledger. No source/evaluator generation occurs in a job.
+
+For equity-risk integration first run risk-pin --source <Forecast directory>
+--request <explicit binding request JSON> --output <NEW pinned directory>.
+Use risk-check with a complete RiskUse JSON. A study-pin --risk-sources JSON maps
+context binding IDs to those pinned directories. Only these fixed job-facing
+files are copied; full-history source-store paths are not passed to the worker.
+
+study-from-signal --signal-run <verified P2 run> --development-bundle <its exact
+P1 bundle> --template <raw-study template JSON> --output <NEW packet.json> bridges
+saved validation scores and same-date beta into the ledger workflow. The template
+must explicitly choose the raw-price cohort, sessions, costs and diagonal risk
+baseline before compilation, with empty contexts, reconstructed history and PIT
+attestation false. Missing source membership/score/beta remains unavailable;
+future label coverage is not a filter. No performance-based winner/cohort is
+chosen. P2 supplies no confirmed issuer/sector links, so the bridge requires
+those optional constraints disabled; evidenced richer contexts can use the main
+study API. Pin/register the compiled packet as a new linked methodology study.
+
+The reference JSON input packet has a 64 MB pre-parse size cap. Risk arrays have
+an independent 512 MB uncompressed cap. Only two validated immutable risk entries
+are cached per worker; every use still checks information time and staleness,
+and publication rehashes pinned inputs. These caps do not claim hard parent RAM
+isolation or an optimized full-history feature/price store.
+
+Study artifacts: spec.json, bundle.json, packet.json, run.json, ledger.json,
+portfolio.json, runtime.json, report.txt and COMPLETE.json. Accounting and risk
+failures remain reportable scientific outcomes. Zero process exit without exact
+validated outputs is operational failure. Publication verifies identity, date
+coverage, NAV reconciliation, source hashes and runtime controls before the
+completion marker. A sampled tree RSS cap, wall deadline and output cap terminate
+owned processes; these are not hard OS RAM limits or filesystem/network ACLs.
+The parent also uses RAM for input validation. Job environments omit keys and
+proxies. No API calls are required for normal studies.
+
+P4 API, notebook and viewer
+--------------------------
+ResearchService(root) is the shared local interface for inspection, progress,
+reports, explicit study execution/reconciliation and signal comparisons. The
+CLI product commands and dashboard use it; notebooks/us_equity_research.ipynb
+demonstrates the same read-only operations without auto-executed outputs.
+
+  & $py -m alpha_lab.research.cli research-serve --root data/market/research
+Then open http://127.0.0.1:8766/research. The existing viewer also exposes /research
+with alpha-lab-serve --workspace <workspace> --research-root <saved library>.
+Opening a page starts no experiment or LLM. The viewer has GET-only endpoints,
+bounded library scans, safe library-relative IDs, verified report access and
+plain-text rendering. Partial/corrupt artifacts have progress but no verified
+report. There is no shell, write, trade, evaluator-generation or reveal route.
+The default standalone listener is loopback; deliberately review any remote bind.
+
+Reports link hypotheses/source identities, signal evidence, target and actual
+positions, risk conventions, fills, costs, failures and assumptions. Runtime
+status is separate from scientific acceptance. Heartbeats are recorded evidence,
+not proof that a saved PID is still the same live process. The viewer does not
+kill/restart jobs. After file/SQLite interruption, study-inspect and explicit
+study-reconcile validate identity/path/hashes before updating the existing
+attempt. Unknown outcomes block duplicates. Full automatic resume stays deferred.
+
+Bounded public agent assistance
+-------------------------------
+PublicSignalTools exposes research_catalog, draft_recipe, validate_draft and
+report_to_user. It can stage/validate fixed supported public recipes only. It
+cannot read market data, coverage or performance; run tests; write evaluator
+code; change budgets/splits; reveal holdout; or modify source attestations.
+Draft validation is the allowed implementation task; local registration and
+evaluation are separate explicit API/CLI actions. Renamed/rescaled duplicate
+recipes do not consume another unique proposal. Fixed workers retire generic
+evaluator generation from the standard equity path.
+
+public-design --config <reviewed JSON> --output <NEW directory> is the only new
+provider entry. It requires public_only, an explicit credential-free HTTPS base
+URL matching local configuration, a one-to-four draft cap, every LLMSettings
+field, an approved model, medium/high reasoning and future UTC deadline. The
+review template intentionally leaves model/reasoning/deadline unset; it cannot
+launch as supplied. No .env is read on imports, inspection or page loads.
+
+Requests and any summaries share existing permanent LLM usage/intent controls,
+call/token/time caps and serialization. Runs record exact public prompts/tool
+schemas, source/runtime fingerprints and times. SDK/automatic retries are zero;
+failures and cleanup errors preserve failed intent rather than reporting completion.
+Temperature/top_p are intentionally omitted, store=false is requested, and
+gateway retention/pricing remain unknown. Output controls and tool authority are
+application restrictions, not OS security isolation. No LLM campaign or private
+Alva data flow is authorized merely by viewing a config or dashboard.
+
+External evidence and unresolved data
+-------------------------------------
+evidence-audit imports explicitly chosen historical work queues and a transition
+clarification packet into a new local hashed worklist. Original records and
+requirements remain unchanged. It adds the historical broker-lending requirement.
+evidence-attach preserves a bounded primary document in a new attachment and
+marks it for human review; it cannot close a case or change an attestation.
+
+The existing 131 economic/PIT cases and 21 vendor-transition clarifications
+require source evidence. Historical borrower capacity/rates/recalls, action
+entitlements/payment/delivery, dated issuer/eligibility and feed arrival/revisions
+cannot be obtained by changing an interface or inventing a backtest value.
+Keep stronger historical/executable claims blocked until those records are
+reviewed. Sharadar remains first, Tiingo retains established gaps, and Arrays
+serves only previously uncovered US equity feeds. This milestone changes no
+provider priority and launches no new data subscription or vendor API campaign.
+
+Acceptance evidence and rollback
+--------------------------------
+Hand-derived tests cover long/short cash, round-trip signed fees/slippage,
+splits, dividend entitlement/payables/payment, weekend cash/funding/borrow,
+renames, cash/stock/mixed mergers, delayed/unmarked consideration, partial/failed
+fills, stale recovery, expired/recall loan observations and censored pending
+orders. Synthetic adapter/projection/integration tests reject semantic mismatch,
+missing evidence, infeasibility and future inputs. Native worker and API tests
+exercise publication gaps, duplicate prevention, read-only behavior and public
+tool boundaries. These demonstrate scoped software behavior, not economic alpha.
+
+Keep immutable inputs/artifacts/registry attempts when rolling back. P1/P2 CLI
+commands and archived inspectors remain usable. Existing legacy behavior and the
+original frozen selection/holdout/backtester are preserved. The sibling equity-
+risk project is consumed read-only. Disable the research router/optional agent
+tools without affecting deterministic CLI correctness or saved evidence.
+
+Explicitly deferred extensions remain deferred: automatic campaign resume,
+richer ML/text alpha (including pretrained-model historical admissibility),
+optimized large-universe execution, intraday/live brokerage, broad package
+restructuring and multi-agent scale-up. They have separate prerequisites and
+were not silently included by the P3/P4 engineering work.

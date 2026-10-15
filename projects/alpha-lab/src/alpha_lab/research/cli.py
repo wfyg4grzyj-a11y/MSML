@@ -120,9 +120,14 @@ def main(argv=None):
     inspect = commands.add_parser('inspect', help='Read-only artifact verification; never retries or starts APIs')
     inspect.add_argument('directory', type=Path)
     signal_commands(commands)
+    from .product_cli import product_commands
+    product_commands(commands)
     args = parser.parse_args(argv)
     try:
-        if args.command.startswith(('signal-', 'registry-')):
+        if args.command.startswith(('study-', 'risk-', 'research-', 'evidence-')) or args.command=='public-design':
+            from .product_cli import product_action
+            result=product_action(args)
+        elif args.command.startswith(('signal-', 'registry-')):
             result = signal_action(args)
         elif args.command == 'pin':
             result = pin_panel(args.panel, args.output, end=args.end_date).model_dump()
