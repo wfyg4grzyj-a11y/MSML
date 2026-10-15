@@ -54,7 +54,7 @@ class Ledger:
 
     def actions(self, session):
         priority = {'split': 0, 'cash_dividend': 1, 'rename': 2, 'unresolved_terminal': 3, 'unresolved_distribution': 3,
-                    'cash_merger': 4, 'stock_merger': 4, 'mixed_merger': 4}
+                    'cash_merger': 4, 'stock_merger': 4, 'mixed_merger': 4, 'stock_distribution': 4}
         actions = sorted((a for a in self.spec.actions if a.date == session.date), key=lambda a: (priority[a.kind], a.action_id))
         merger_ids = [a.security_id for a in actions if 'merger' in a.kind]
         if len(set(merger_ids)) != len(merger_ids):
@@ -81,7 +81,7 @@ class Ledger:
                     self.unpriced_costs.append({'date':session.date,'security_id':sid,
                                                 'reason':'unresolved_distribution_entitlement','entitled_shares':quantity})
             else:
-                if a.kind != 'cash_dividend':
+                if a.kind not in ('cash_dividend', 'stock_distribution'):
                     self.shares[sid] = 0.
                     self.terminal.add(sid)  # Former security cannot trade after conversion.
                 if a.cash_usd_per_share is not None and quantity:
@@ -98,7 +98,8 @@ class Ledger:
                     self.unpriced_costs.append({'date': session.date, 'security_id': sid,
                                                 'reason': 'unsettled_stock_dividend_entitlement_unknown'})
             self.note(session.date, 'action', action_id=a.action_id, security_id=sid, action_kind=a.kind,
-                      entitled_prior_shares=quantity, evidence=a.evidence, evidence_kind=a.evidence_kind)
+                      entitled_prior_shares=quantity, evidence=a.evidence, evidence_kind=a.evidence_kind,
+                      **({'distribution_convention':a.distribution_convention} if a.distribution_convention else {}))
         remaining = []
         for claim in self.claims:
             if claim['due'] <= session.date:

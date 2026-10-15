@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .contracts import Artifact, Hash, Identifier, StrictModel, digest, iso_day
 from .ledger_contracts import LedgerScenario, utc_stamp
@@ -30,9 +30,33 @@ class PortfolioContext(StrictModel):
     risk_binding_id: Identifier | None
     fill_lag_sessions: Annotated[int, Field(ge=1, le=20)]
     points: Annotated[list[SignalPoint], Field(min_length=2, max_length=5000)]
+    intent: Literal['close_all'] | None = None
+
+    @model_serializer(mode='wrap')
+    def archived_shape(self, handler):
+        value=handler(self)
+        if self.intent is None:
+            value.pop('intent',None)
+        return value
+
+    @model_validator(mode='after')
+    def close_intent(self):
+        if self.intent == 'close_all' and any(p.eligible or p.score is not None for p in self.points):
+            raise ValueError('An explicit close has no eligible alpha signals')
+        return self
 
     _date = field_validator('date')(iso_day)
     _time = field_validator('information_time')(utc_stamp)
+
+
+class DailyRiskControls(StrictModel):
+    methodology: Literal['close_breach_uniform_reduction_v1']
+    fill_lag_sessions: Literal[1]
+    max_gross: Annotated[float, Field(gt=0, le=10)]
+    max_name: Annotated[float, Field(gt=0, le=1)]
+    net_tolerance: Annotated[float, Field(ge=0, le=10)]
+    beta_tolerance: Annotated[float, Field(ge=0, le=10)]
+    exit_ineligible_holdings: bool
 
 
 class StudyPacket(StrictModel):
@@ -51,9 +75,23 @@ class StudyPacket(StrictModel):
     identity_namespace: Literal['sharadar_permaticker_share_class', 'synthetic_share_class']
     max_risk_age_calendar_days: Annotated[int, Field(ge=0, le=30)]
     contexts: list[PortfolioContext]
+    daily_risk_controls: DailyRiskControls | None = None
+
+    @model_serializer(mode='wrap')
+    def archived_shape(self, handler):
+        value = handler(self)
+        if self.daily_risk_controls is None:
+            value.pop('daily_risk_controls', None)
+        return value
 
     @model_validator(mode='after')
     def consistent(self):
+        if self.daily_risk_controls is not None:
+            if self.portfolio_policy is None or self.risk_mode == 'none':
+                raise ValueError('Daily controls require an explicit portfolio risk policy')
+            for field in ('max_gross','max_name','net_tolerance','beta_tolerance'):
+                if getattr(self.daily_risk_controls, field) > getattr(self.portfolio_policy, field):
+                    raise ValueError('Daily controls cannot weaken hard portfolio limits')
         if self.risk_mode == 'none':
             if self.portfolio_policy is not None or self.contexts or self.variance_per_session is not None:
                 raise ValueError('Ledger-only studies have no hidden portfolio policy')

@@ -72,6 +72,12 @@ def validate_results(directory,spec,bundle,packet):
                   'isolation':'credential_filtered_process_not_filesystem_or_network_sandbox'}:
         raise ResearchError('Study worker runtime does not match its requested boundary')
     if len(portfolio.get('plans',[]))!=len(packet.contexts):raise ResearchError('Portfolio decisions are missing')
+    if packet.daily_risk_controls is not None:
+        controls=portfolio.get('risk_controls',[])
+        if (portfolio.get('daily_risk_controls')!=packet.daily_risk_controls.model_dump()
+                or [(p.get('date'),p.get('information_time')) for p in controls]
+                != [(s.date,s.close_utc) for s in packet.scenario.sessions]):
+            raise ResearchError('Daily risk-control policy/observation evidence is missing or inconsistent')
     return ledger,portfolio
 
 
@@ -83,6 +89,14 @@ def study_report(spec,bundle,packet,ledger,portfolio):
     if packet.portfolio_policy and packet.portfolio_policy.target_limits is not None:
         target_detail=('Construction-only target limits: '+canonical(packet.portfolio_policy.target_limits.model_dump())+'\n'
                        'Fill admission and retained-position monitoring use unchanged hard limits; no buffered-to-hard fallback.\n')
+    if packet.daily_risk_controls is not None:
+        target_detail+=('Daily risk controls: '+canonical(packet.daily_risk_controls.model_dump())+'\n'
+                        'Hard breaches trigger uniform held-share reductions; non-alpha receipts exit next close. '
+                        'No reranking/increases. Daily reductions override alpha increases; scheduled zero closes have priority.\n'
+                        'Gaps, unavailable quotes and participation can leave residual breaches; reductions are not guaranteed fills.\n')
+    if any(a.kind=='stock_distribution' for a in packet.scenario.actions):
+        target_detail+=('Stock distributions retain the parent and create signed recipient shares, including short obligations. '
+                        'Fractional holdings and same-session delivery are declared research conventions, not broker settlement evidence.\n')
     return ('US equity integrated research report — raw-share accounting v1\n'
             f'Hypothesis: {packet.hypothesis}\nFamily/hypothesis: {spec.family_id}/{spec.hypothesis_id}\n'
             f'Trial: {spec.semantic_id()}\nBundle: {bundle.bundle_id}\nDevelopment sessions: {bundle.start}..{bundle.end}\n'

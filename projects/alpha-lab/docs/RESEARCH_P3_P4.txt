@@ -312,3 +312,43 @@ richer ML/text alpha (including pretrained-model historical admissibility),
 optimized large-universe execution, intraday/live brokerage, broad package
 restructuring and multi-agent scale-up. They have separate prerequisites and
 were not silently included by the P3/P4 engineering work.
+
+Stock-distribution and daily-control extension
+----------------------------------------------
+Action kind stock_distribution retains the parent and books signed recipient
+shares: a short parent creates a short recipient obligation, not cash income.
+The current primitive explicitly requires distribution_convention
+signed_fractional_prior_close_same_session_delivery_research and same-session
+payment_date. Real-source scenarios must label this
+declared_distribution_assumption; it cannot establish PIT attestation or verified
+broker settlement. Fractional cash-in-lieu, taxes and actual loan delivery are
+not reconstructed. A vendor valuation companion is not another cash dividend.
+Use raw recipient marks and include received shares in risk, dividends, borrow
+and final disposition. Missing recipient marks still suppress observed NAV.
+
+StudyPacket optionally accepts daily_risk_controls, methodology
+close_breach_uniform_reduction_v1, fill_lag_sessions=1, inner max_gross/max_name/
+net_tolerance/beta_tolerance, and exit_ineligible_holdings. Inner limits cannot
+exceed hard portfolio limits. Existing packets omit this extension when unset.
+Daily close observations use current NAV/quotes and the latest known context.
+Hard breaches trigger uniform reductions of held shares; optionally exit held
+non-alpha receipts. No new positions or score reranking occur in this path.
+Required reductions larger than hard turnover are staged at 90% of that cap.
+Fixed quantities fill next session with normal costs, raw-volume participation,
+hard admission checks and reduce-only treatment of pre-existing violations.
+An intervention is not a guarantee of restored exposure: gaps, partial/no fills
+and unavailable evidence remain visible in risk_controls/actual_position_risk.
+Without observed NAV/coverage, sizing is blocked and reported. Last-session
+triggers are right-censored, never executed at the same close.
+
+Daily reductions override scheduled alpha increases. An explicitly declared
+PortfolioContext intent=close_all, with all signals absent/ineligible, takes
+priority and submits exact zero-share targets for held assets, including received
+securities. This avoids optimizer numerical residue in a predeclared liquidation.
+Unheld ineligible zero targets do not pre-order future distributions when daily
+controls are enabled. Add received assets to dated context/risk coverage with no
+alpha score or eligibility. Missing held-asset coverage is never silently dropped.
+
+Freeze the control/event conventions and data availability assumptions before a
+new linked registered trial. Preserve preceding registries/results and reported
+failures. Accounting/control changes do not create fresh alpha validation.

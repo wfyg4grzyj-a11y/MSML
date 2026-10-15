@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .contracts import DEVELOPMENT_END, Hash, Identifier, StrictModel, iso_day
 
@@ -57,14 +57,22 @@ class Action(StrictModel):
     security_id: Identifier
     date: str
     known_at: str
-    kind: Literal['split', 'cash_dividend', 'cash_merger', 'stock_merger', 'mixed_merger', 'rename', 'unresolved_terminal', 'unresolved_distribution']
+    kind: Literal['split', 'cash_dividend', 'stock_distribution', 'cash_merger', 'stock_merger', 'mixed_merger', 'rename', 'unresolved_terminal', 'unresolved_distribution']
     ratio: Positive | None
     cash_usd_per_share: Nonnegative | None
     recipient_id: Identifier | None
     payment_date: str | None
     new_ticker: str | None
     evidence: Hash
-    evidence_kind: Literal['verified_terms', 'synthetic_reference', 'unresolved', 'declared_dividend_assumption']
+    evidence_kind: Literal['verified_terms', 'synthetic_reference', 'unresolved', 'declared_dividend_assumption', 'declared_distribution_assumption']
+    distribution_convention: Literal['signed_fractional_prior_close_same_session_delivery_research'] | None = None
+
+    @model_serializer(mode='wrap')
+    def archived_shape(self, handler):
+        value = handler(self)
+        if self.distribution_convention is None:
+            value.pop('distribution_convention', None)
+        return value
 
     _date = field_validator('date')(iso_day)
     _time = field_validator('known_at')(utc_stamp)
@@ -78,6 +86,7 @@ class Action(StrictModel):
         expected = {'split': {'ratio'}, 'cash_dividend': {'cash_usd_per_share', 'payment_date'},
                     'cash_merger': {'cash_usd_per_share', 'payment_date'},
                     'stock_merger': {'ratio', 'recipient_id', 'payment_date'}, 'rename': {'new_ticker'},
+                    'stock_distribution': {'ratio', 'recipient_id', 'payment_date'},
                     'mixed_merger': {'ratio', 'recipient_id', 'cash_usd_per_share', 'payment_date'},
                     'unresolved_terminal': set(), 'unresolved_distribution': set()}[self.kind]
         terms = {key for key in ('ratio', 'cash_usd_per_share', 'recipient_id', 'payment_date', 'new_ticker')
@@ -86,6 +95,13 @@ class Action(StrictModel):
             raise ValueError('Require exact evidenced terms; unknown terms remain unresolved')
         if self.evidence_kind == 'declared_dividend_assumption' and self.kind != 'cash_dividend':
             raise ValueError('Declared dividend assumptions cannot supply merger or other action terms')
+        if self.kind == 'stock_distribution':
+            if (self.distribution_convention is None or self.payment_date != self.date
+                    or self.recipient_id == self.security_id
+                    or self.evidence_kind not in ('synthetic_reference', 'declared_distribution_assumption')):
+                raise ValueError('Fractional stock distributions require explicit same-session research delivery conventions')
+        elif self.distribution_convention is not None or self.evidence_kind == 'declared_distribution_assumption':
+            raise ValueError('Distribution conventions apply only to stock distributions')
         return self
 
 
@@ -152,7 +168,7 @@ class LedgerScenario(StrictModel):
                 any(a.evidence_kind=='synthetic_reference' for a in self.actions)
                 or any(l.evidence_kind=='synthetic_reference' for l in self.lending)):
             raise ValueError('Real-source scenarios cannot promote synthetic action/loan evidence')
-        if self.point_in_time_attested and any(a.evidence_kind=='declared_dividend_assumption' for a in self.actions):
+        if self.point_in_time_attested and any(a.evidence_kind in ('declared_dividend_assumption', 'declared_distribution_assumption') for a in self.actions):
             raise ValueError('Assumed dividend terms/settlement cannot attest historical source availability')
         if any(a.kind.startswith('unresolved_') for a in self.actions) and self.economic_outcomes_resolved:
             raise ValueError('Unknown terminal terms cannot be declared economically resolved')

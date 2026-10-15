@@ -6,6 +6,7 @@ from datetime import datetime
 import numpy as np
 
 from .contracts import ResearchError
+from .daily_controls import reduction_targets
 from .ledger import Ledger, lending_at
 from .ledger_contracts import Decision
 from .portfolio import PositionInput, coverage, exposures, project_portfolio
@@ -16,6 +17,7 @@ class PortfolioController:
     def __init__(self, packet, directory):
         self.packet,self.directory=packet,directory
         self.plans,self.observed=[] ,[]
+        self.controls=[]
         self.risk_cache={}
 
     def context(self, session):
@@ -65,11 +67,17 @@ class PortfolioController:
                          borrow_available_shares=available,issuer_id=point.issuer_id,sector_id=point.sector_id,beta=point.beta))
         return result
 
-    def decisions(self, ledger, session):
+    def alpha_decisions(self, ledger, session):
         context=next((c for c in self.packet.contexts if c.date==session.date),None)
         if context is None:return []
         evidence={'date':session.date,'context_id':context.context_id,'signal_evidence_sha256':context.signal_evidence_sha256,
                   'source_policy_id':context.source_policy_id,'decision_nav_usd':ledger.daily[-1]['nav_observed_usd']}
+        if context.intent == 'close_all':
+            targets={sid:0. for sid,q in ledger.shares.items() if q}
+            self.plans.append(evidence | {'status':'zero_target','reason':'explicit_close_all',
+                                         'target_weights':dict(targets),'target_shares':targets})
+            return [Decision(decision_id=context.context_id,date=session.date,information_time=context.information_time,
+                             target_shares=targets,fill_lag_sessions=context.fill_lag_sessions)]
         if not ledger.daily[-1]['valuation_resolved']:
             self.plans.append(evidence | {'status':'insufficient_evidence','reason':'unresolved_accounting_nav','target_weights':None})
             return []
@@ -82,8 +90,48 @@ class PortfolioController:
             return []
         self.plans.append(evidence | result | {'risk':risk})
         if result['target_weights'] is None:return []
+        targets=result['target_shares']
+        if self.packet.daily_risk_controls is not None:
+            targets={p.security_id:targets[p.security_id] for p in inputs
+                     if p.held_shares or p.eligible or p.score is not None or targets[p.security_id] != 0.}
         return [Decision(decision_id=context.context_id,date=session.date,information_time=context.information_time,
-                         target_shares=result['target_shares'],fill_lag_sessions=context.fill_lag_sessions)]
+                         target_shares=targets,fill_lag_sessions=context.fill_lag_sessions)]
+
+    def decisions(self, ledger, session):
+        alpha = self.alpha_decisions(ledger,session)
+        if self.packet.daily_risk_controls is None:
+            return alpha
+        evidence = {'date':session.date,'information_time':session.close_utc,
+                    'decision_nav_usd':ledger.daily[-1]['nav_observed_usd']}
+        # An explicit scheduled close remains authoritative, including received assets.
+        if alpha and all(q == 0. for d in alpha for q in d.target_shares.values()):
+            self.controls.append(evidence | {'status':'scheduled_close_priority'})
+            return alpha
+        context = self.context(session)
+        try:
+            if context is None:
+                raise ResearchError('Risk context unavailable')
+            if not ledger.daily[-1]['valuation_resolved']:
+                raise ResearchError('Accounting valuation is unresolved')
+            ids,covariance,risk = self.risk(context,session)
+            result = reduction_targets(self.inputs(ledger,session,context),ids,covariance,ledger.nav(),
+                                       self.packet.portfolio_policy,self.packet.daily_risk_controls)
+            record = evidence | result | {'context_id':context.context_id,'risk':risk}
+        except ResearchError as error:
+            self.controls.append(evidence | {'status':'insufficient_evidence','reason':str(error)})
+            return alpha
+        if result['status'] == 'no_trigger':
+            self.controls.append(record)
+            return alpha
+        if session.date == self.packet.scenario.sessions[-1].date:
+            self.controls.append(record | {'status':'right_censored_no_next_session'})
+            return []
+        if alpha:
+            self.plans[-1].update(status='suppressed_daily_risk_control',target_weights=None,
+                                 target_shares=None,reason='Daily reductions take priority over alpha increases')
+        self.controls.append(record)
+        return [Decision(decision_id='daily-control-'+session.date,date=session.date,
+                         information_time=session.close_utc,target_shares=result['target_shares'],fill_lag_sessions=1)]
 
     def candidate(self, ledger, session, shares, cash):
         context=self.context(session)
@@ -127,6 +175,9 @@ def evaluate_study(packet, directory):
         controller=PortfolioController(packet,directory)
         result=ledger.run(decision_provider=controller.decisions,candidate_check=controller.candidate,position_reporter=controller.positions)
         plans,positions=controller.plans,controller.observed
-    return result,{'plans':plans,'actual_position_risk':positions,'selection':'none','fallback':'none',
+    portfolio={'plans':plans,'actual_position_risk':positions,'selection':'none','fallback':'none',
                    'objective':'unitless_score_projection_not_expected_return','investment_ready':False,
                    'risk_mode':packet.risk_mode,'portfolio_policy':packet.portfolio_policy.model_dump() if packet.portfolio_policy else None}
+    if packet.daily_risk_controls is not None:
+        portfolio.update(daily_risk_controls=packet.daily_risk_controls.model_dump(),risk_controls=controller.controls)
+    return result,portfolio
