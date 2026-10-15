@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 import numpy as np
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from .contracts import Identifier, ResearchError, StrictModel
 
@@ -20,6 +20,15 @@ class PositionInput(StrictModel):
     issuer_id: Identifier | None
     sector_id: Identifier | None
     beta: float | None
+
+
+class TargetLimits(StrictModel):
+    """Optional stricter construction limits; never used for fills or monitoring."""
+    max_gross: Annotated[float, Field(gt=0, le=4)]
+    max_name: Annotated[float, Field(gt=0, le=1)]
+    max_turnover: Annotated[float, Field(ge=0, le=8)]
+    net_tolerance: Annotated[float, Field(ge=0, le=.1)]
+    beta_tolerance: Annotated[float, Field(ge=0, le=.1)]
 
 
 class PortfolioPolicy(StrictModel):
@@ -40,6 +49,21 @@ class PortfolioPolicy(StrictModel):
     numerical_tolerance: Annotated[float, Field(gt=0, le=.00001)]
     max_iterations: Annotated[int, Field(ge=1, le=1000)]
     max_securities: Annotated[int, Field(ge=2, le=512)]
+    target_limits: TargetLimits | None = None
+
+    @model_validator(mode='after')
+    def conservative_targets(self):
+        if self.target_limits is not None and any(
+                value > getattr(self, name) for name, value in self.target_limits.model_dump().items()):
+            raise ValueError('Construction target limits cannot exceed hard portfolio limits')
+        return self
+
+    @model_serializer(mode='wrap')
+    def archive_compatible(self, handler):
+        data=handler(self)
+        if self.target_limits is None:
+            data.pop('target_limits',None)
+        return data
 
 
 def coverage(inputs, ids, covariance, policy, nav, *, covariance_already_validated=False):
@@ -100,6 +124,28 @@ def exposures(inputs, weights, covariance, nav, policy):
 
 
 def project_portfolio(inputs, ids, covariance, nav, policy):
+    """Construct buffered targets, keeping the caller's hard policy unchanged.
+
+    The fill/retained-position paths call exposures with the original policy.
+    A failed buffered optimization has no unbuffered fallback.
+    """
+    if policy.target_limits is None:
+        return _project_portfolio(inputs,ids,covariance,nav,policy)
+    limits=policy.target_limits.model_dump()
+    construction=policy.model_copy(update=limits | {'target_limits':None})
+    result=_project_portfolio(inputs,ids,covariance,nav,construction)
+    evidence={'construction_limits':limits,'hard_limits':{name:getattr(policy,name) for name in limits}}
+    if result['target_weights'] is None:
+        return result | evidence
+    weights=np.array([result['target_weights'][sid] for sid in ids])
+    values,violations=exposures(inputs,weights,covariance,nav,policy)
+    if violations:
+        return {'status':'infeasible','reason':'constructed_target_breaches_hard_limits',
+                'violations':violations,'target_weights':None,'fallback':'none'} | evidence
+    return result | evidence | {'exposures':values,'hard_violations':[]}
+
+
+def _project_portfolio(inputs, ids, covariance, nav, policy):
     """Fixed scores shape a target; this is not an expected-return forecast."""
     from scipy.optimize import Bounds, LinearConstraint, minimize
     failure=coverage(inputs,ids,covariance,policy,nav)
@@ -107,7 +153,7 @@ def project_portfolio(inputs, ids, covariance, nav, policy):
     active=[i for i,p in enumerate(inputs) if p.held_shares or (p.eligible and p.tradable and p.score is not None)]
     if len(active)!=len(inputs):
         if active:
-            sub=project_portfolio([inputs[i] for i in active],[ids[i] for i in active],covariance[np.ix_(active,active)],nav,policy)
+            sub=_project_portfolio([inputs[i] for i in active],[ids[i] for i in active],covariance[np.ix_(active,active)],nav,policy)
             if sub['target_weights'] is None:return sub
             weights=np.array([sub['target_weights'].get(sid,0.) for sid in ids])
         else:

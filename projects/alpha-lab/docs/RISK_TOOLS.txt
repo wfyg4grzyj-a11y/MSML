@@ -117,6 +117,14 @@ false, even when numerical optimization succeeds. Price/beta/borrow availability
 and mandate adequacy remain the caller's responsibility. Fees/cash/actions/fills
 still belong to the accounting ledger, not these risk calculations.
 
+PortfolioPolicy can include optional target_limits (max_gross, max_name,
+max_turnover, net_tolerance, beta_tolerance), each no looser than its hard bound.
+These apply only to construction, with both sets returned in the plan. Fill-time
+admission and retained-position monitoring keep the original hard limits. Failed
+buffered construction has no unbuffered fallback. Buffers are explicit inputs,
+not a guarantee against future price gaps or an automatic daily risk-reduction
+policy; see RESEARCH_P3_P4.txt.
+
 The existing risk-pin/risk-check and StudyPacket equity_risk_forecast path retain
 their stricter historical/PIT requirements. This October 2026 export cannot be
 used in 2014-2022 development backtests. No old holdout is reopened. To add usable

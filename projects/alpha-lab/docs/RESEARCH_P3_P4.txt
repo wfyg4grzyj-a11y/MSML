@@ -254,6 +254,18 @@ Alva data flow is authorized merely by viewing a config or dashboard.
 
 External evidence and unresolved data
 -------------------------------------
+PortfolioPolicy optionally accepts target_limits with max_gross, max_name,
+max_turnover, net_tolerance and beta_tolerance. Every target bound must be no
+looser than its corresponding hard policy bound. Only score projection uses
+these stricter construction limits; next-close fill admission and daily retained
+position checks continue to use the original hard policy. Plans record both
+sets. Failed construction has no unbuffered fallback. Explicit zero net/beta
+construction tolerances center the intended book; they do not guarantee that
+later price gaps or costs stay within hard bounds. Frozen held positions can
+make buffered construction infeasible. Missing target_limits preserves earlier
+policy serialization and behavior. Buffers enter the bundle/computation identity;
+changing them after a completed trial requires a newly registered linked trial.
+
 Real-source exploratory ledgers may mark cash-dividend inputs as
 declared_dividend_assumption when historical unit conversion or payment timing
 is a declared research convention. The evidence hash must identify the source

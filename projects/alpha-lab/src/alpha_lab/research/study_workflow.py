@@ -79,6 +79,10 @@ def study_report(spec,bundle,packet,ledger,portfolio):
     totals={key:sum(day[key] for day in ledger['daily']) for key in
             ('cash_interest_usd','funding_usd','borrow_usd','action_pnl_usd','raw_mark_pnl_usd','trade_cost_usd')}
     from .contracts import canonical
+    target_detail=''
+    if packet.portfolio_policy and packet.portfolio_policy.target_limits is not None:
+        target_detail=('Construction-only target limits: '+canonical(packet.portfolio_policy.target_limits.model_dump())+'\n'
+                       'Fill admission and retained-position monitoring use unchanged hard limits; no buffered-to-hard fallback.\n')
     return ('US equity integrated research report — raw-share accounting v1\n'
             f'Hypothesis: {packet.hypothesis}\nFamily/hypothesis: {spec.family_id}/{spec.hypothesis_id}\n'
             f'Trial: {spec.semantic_id()}\nBundle: {bundle.bundle_id}\nDevelopment sessions: {bundle.start}..{bundle.end}\n'
@@ -89,6 +93,7 @@ def study_report(spec,bundle,packet,ledger,portfolio):
             'Prior-close shares determine ex-session entitlement; payment/delivery changes signed claims into cash/shares.\n'
             'T0 research settlement; short proceeds segregated without interest/rebate. No broker settlement is modeled.\n'
             f'Accounting policies: {canonical(packet.scenario.policy.model_dump())}\n'
+            f'{target_detail}'
             f'Initial NAV: {ledger["initial_nav_usd"]}; observed final NAV: {ledger["final_nav_observed_usd"]}; estimated final NAV: {ledger["final_nav_estimate_usd"]}\n'
             f'Components USD: {canonical(totals)}\n'
             f'Unresolved valuation sessions: {sum(not d["valuation_resolved"] for d in ledger["daily"])}\n'
