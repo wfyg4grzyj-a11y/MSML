@@ -64,7 +64,7 @@ class Action(StrictModel):
     payment_date: str | None
     new_ticker: str | None
     evidence: Hash
-    evidence_kind: Literal['verified_terms', 'synthetic_reference', 'unresolved']
+    evidence_kind: Literal['verified_terms', 'synthetic_reference', 'unresolved', 'declared_dividend_assumption']
 
     _date = field_validator('date')(iso_day)
     _time = field_validator('known_at')(utc_stamp)
@@ -84,6 +84,8 @@ class Action(StrictModel):
                  if getattr(self, key) is not None}
         if terms != expected or (self.evidence_kind == 'unresolved') != self.kind.startswith('unresolved_'):
             raise ValueError('Require exact evidenced terms; unknown terms remain unresolved')
+        if self.evidence_kind == 'declared_dividend_assumption' and self.kind != 'cash_dividend':
+            raise ValueError('Declared dividend assumptions cannot supply merger or other action terms')
         return self
 
 
@@ -150,6 +152,8 @@ class LedgerScenario(StrictModel):
                 any(a.evidence_kind=='synthetic_reference' for a in self.actions)
                 or any(l.evidence_kind=='synthetic_reference' for l in self.lending)):
             raise ValueError('Real-source scenarios cannot promote synthetic action/loan evidence')
+        if self.point_in_time_attested and any(a.evidence_kind=='declared_dividend_assumption' for a in self.actions):
+            raise ValueError('Assumed dividend terms/settlement cannot attest historical source availability')
         if any(a.kind.startswith('unresolved_') for a in self.actions) and self.economic_outcomes_resolved:
             raise ValueError('Unknown terminal terms cannot be declared economically resolved')
         dates = [s.date for s in self.sessions]

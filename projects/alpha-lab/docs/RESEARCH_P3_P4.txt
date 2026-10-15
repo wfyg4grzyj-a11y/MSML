@@ -254,6 +254,15 @@ Alva data flow is authorized merely by viewing a config or dashboard.
 
 External evidence and unresolved data
 -------------------------------------
+Real-source exploratory ledgers may mark cash-dividend inputs as
+declared_dividend_assumption when historical unit conversion or payment timing
+is a declared research convention. The evidence hash must identify the source
+and assumption; the journal retains the label. This label is limited to cash
+dividends, cannot supply merger/distribution terms, and cannot enter a scenario
+claiming point-in-time attestation. It does not establish observed settlement or
+resolve a stock-spinoff entitlement. Split-adjusted dividend/volume records must
+be put on the ledger's raw-share basis without also earning adjusted returns.
+
 evidence-audit imports explicitly chosen historical work queues and a transition
 clarification packet into a new local hashed worklist. Original records and
 requirements remain unchanged. It adds the historical broker-lending requirement.
