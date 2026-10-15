@@ -1,0 +1,44 @@
+{
+  "family_id": "us-equity-signals-v1",
+  "hypothesis_id": "baseline-momentum-v1",
+  "recipe": {
+    "name": "momentum",
+    "operator": "linear",
+    "factors": {"momentum_12_1": 1.0},
+    "transform": "cross_sectional_rank"
+  },
+  "label": {
+    "target": "simple_excess_spy",
+    "horizon_sessions": 21,
+    "execution_lag_sessions": 1,
+    "availability_lag_sessions": 1,
+    "basis": "vendor_adjusted_close_to_close_no_gap_fill"
+  },
+  "folds": [
+    {
+      "name": "validation-2017-2018",
+      "train_start": "2014-01-01", "train_end": "2016-12-31",
+      "validation_start": "2017-01-01", "validation_end": "2018-12-31",
+      "embargo_sessions": 0
+    },
+    {
+      "name": "validation-2019-2020",
+      "train_start": "2014-01-01", "train_end": "2018-12-31",
+      "validation_start": "2019-01-01", "validation_end": "2020-12-31",
+      "embargo_sessions": 0
+    },
+    {
+      "name": "validation-2021-2022",
+      "train_start": "2014-01-01", "train_end": "2020-12-31",
+      "validation_start": "2021-01-01", "validation_end": "2022-12-31",
+      "embargo_sessions": 0
+    }
+  ],
+  "quantiles": 5,
+  "min_cross_section": 30,
+  "seed": 42,
+  "threads": 1,
+  "timeout_seconds": 180,
+  "max_output_bytes": 40000000,
+  "memory_limit_mb": 2048
+}

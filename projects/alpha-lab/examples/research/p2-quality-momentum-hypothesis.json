@@ -1,0 +1,11 @@
+{
+  "hypothesis_id": "quality-scaled-momentum-v1",
+  "family_id": "us-equity-signals-v1",
+  "premise": "A fixed nonnegative quality multiplier may distinguish momentum in companies with stronger profitability and lower leverage. Compare it descriptively to the registered momentum baseline with the coverage difference visible.",
+  "tests": [
+    "Use the fixed quality_scaled_momentum catalog operator with no fitted coefficients or parameter search.",
+    "Report each validation fold, rank IC, quintile outcome coverage and score stability.",
+    "Compare score correlations and differing coverage without a future-outcome intersection filter.",
+    "Do not tune on results, revisit the original holdout or infer trading profitability."
+  ]
+}
