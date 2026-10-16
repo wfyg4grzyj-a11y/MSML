@@ -172,7 +172,8 @@ class Registry:
             self.db.execute('UPDATE attempts SET status=?,finished=?,result_hash=?,failure=? WHERE id=?',
                             (target, stamp(), result_hash, failure, attempt))
             kind=complete.get('evidence_kind','development_signal_diagnostics_published') if complete else None
-            if kind not in (None,'development_signal_diagnostics_published','development_raw_share_ledger_published'):
+            if kind not in (None,'development_signal_diagnostics_published','development_raw_share_ledger_published',
+                            'development_action_accounting_continuation_published'):
                 raise ResearchError('Unsupported completed evidence kind')
             self.db.execute('UPDATE exposures SET result_hash=?,kind=? WHERE attempt=?',
                             (result_hash, kind if complete else
