@@ -1,3 +1,40 @@
+# US equity research in this fork
+
+The standard equity workflow uses fixed local evaluators, explicit data and timing
+contracts, registered hypotheses and inspectable artifacts. It includes a feature
+and signal laboratory, a raw-share/cash/action ledger, constrained portfolios and
+a versioned consumer of the separate equity-risk project's forecasts.
+
+Start with `python -m alpha_lab.research.cli --help`. On native Windows, use the
+environment's Python directly. Normal research and saved-result inspection need
+no LLM connection. The optional public recipe designer requires intentionally
+selected model, reasoning, budgets and a UTC deadline.
+
+- [Accounting, risk and product guide](docs/RESEARCH_P3_P4.txt)
+- [Local portfolio risk tools and model setup](docs/RISK_TOOLS.txt)
+- [Signal laboratory guide](docs/RESEARCH_P2.txt)
+- [Legacy compatibility guide](docs/RESEARCH_P1.txt)
+- [Read-only research notebook](notebooks/us_equity_research.ipynb)
+- [Explicit synthetic study example](examples/research/p3-study-packet.json)
+
+The dashboard starts with `python -m alpha_lab.research.cli research-serve --root
+data/market/research` and is available at `http://127.0.0.1:8766/research`. Viewing
+saved research starts no experiments or model requests. Results remain
+provisional: historical data, borrow and terminal-outcome evidence require
+separate review; engineering completion does not establish an investable edge.
+
+The equity-risk project's three models are also available through the local
+`risk-tools-*` commands and `ResearchService.risk(...)`: portfolio volatility,
+attribution, exposures, trade impact and constrained research targets. The pinned
+October 12, 2026 library covers 944 securities with 1/5/21-session horizons.
+Dates and covered identities must match exactly. This research-only export is
+separate from the attested historical-backtest contract and the public LLM tools.
+
+## Upstream AlphaLab reference
+
+The original generic pipeline below remains available for compatibility. Its
+generated-evaluator workflow is separate from this fork's standard equity path.
+
 <div align="center">
 
 <img src="header.png" alt="AlphaLab" width="600">
@@ -537,6 +574,20 @@ Requires ANTHROPIC_API_KEY in your `.env`.
 ---
 
 ## Running Your Own Experiments
+
+### Bounded US equity research on Windows
+
+The fork includes a dated Sharadar equity panel, a constrained market-neutral
+backtester, and an AlphaLab strategy-design loop. The LLM sees public factor
+definitions and generated strategy specifications; market data and backtest
+results stay local. Selection is frozen before holdout evaluation. See
+[US equity research instructions](docs/US_EQUITY_RESEARCH.txt) for setup,
+commands, controls, and the current research limitations.
+
+Standard `run.py` configs can opt into shared LLM controls through
+`llm_runtime`. This requires an explicit approved gateway model and medium or
+high reasoning, and applies the chosen effort and budget to pipeline agents
+and Responses-based summaries. Existing configs keep their current behavior.
 
 ### Use an agent to set up your config
 

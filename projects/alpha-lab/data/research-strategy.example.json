@@ -1,0 +1,7 @@
+{
+  "name": "legacy-value-baseline",
+  "factors": {
+    "book_yield": 1.0,
+    "earnings_yield": 1.0
+  }
+}

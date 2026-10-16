@@ -39,6 +39,7 @@ from alpha_lab.events import (
 )
 from alpha_lab.prompts import build_system_prompt
 from alpha_lab.provider import Provider, ToolCall
+from alpha_lab.llm_runtime import LLMRunError, LLMRuntime
 from alpha_lab.tools import ALL_TOOL_SCHEMAS, execute_tool, get_tool_schemas, parse_tool_args
 
 logger = logging.getLogger("alpha_lab.agent")
@@ -83,12 +84,14 @@ class AgentLoop:
         db: Any | None = None,
         metrics: Any | None = None,
         adapter: Any | None = None,
+        tool_executor: Callable[[str, dict], dict] | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
         self.context = context
         self.event_callback = event_callback
-        self.reasoning_effort = reasoning_effort
+        runtime = getattr(provider, "runtime", None)
+        self.reasoning_effort = runtime.settings.reasoning_effort if isinstance(runtime,LLMRuntime) else reasoning_effort
         self.config = config
         self.tools = tools if tools is not None else ALL_TOOL_SCHEMAS
         self.prompt_builder = prompt_builder or build_system_prompt
@@ -97,6 +100,7 @@ class AgentLoop:
         self.db = db
         self.metrics = metrics
         self.adapter = adapter
+        self.tool_executor = tool_executor
 
         self._depth = 0  # 0 = top-level agent, 1 = sub-agent (max)
         self._consecutive_tool_calls = 0
@@ -275,7 +279,8 @@ class AgentLoop:
             self.context.summarize_and_fork()
             # Clear the actual API history — the summary is injected into
             # the system prompt, so old messages no longer need to be sent.
-            self._input_history.clear()
+            if self.context.last_summarization_succeeded:
+                self._input_history.clear()
 
         input_items = self.provider.build_user_items(message)
         self._run_loop(input_items)
@@ -363,7 +368,6 @@ class AgentLoop:
                     self.emit(ErrorEvent(
                         message=f"Agent stuck: {MAX_CONSECUTIVE_NUDGES} consecutive nudges without tool calls. Stopping.",
                     ))
-                    self._done = True
                     return
                 input_items = self.provider.build_user_items(CONTINUE_MESSAGE)
 
@@ -425,6 +429,9 @@ class AgentLoop:
 
                 return response
 
+            except LLMRunError as e:
+                self.emit(ErrorEvent(message=str(e)))
+                return None
             except Exception as e:
                 if self.metrics is not None:
                     self.metrics.record_error(is_api_error=True)
@@ -453,6 +460,9 @@ class AgentLoop:
         for tc in tool_calls:
             if self._stop_requested:
                 break
+            runtime = getattr(self.provider, "runtime", None)
+            if isinstance(runtime, LLMRuntime):
+                runtime.check_deadline()
 
             name = tc.name
             call_id = tc.call_id
@@ -504,7 +514,17 @@ class AgentLoop:
             ))
 
             # Handle spawn_sub_agent within AgentLoop (needs self.provider, etc.)
-            if name == "spawn_sub_agent":
+            if isinstance(runtime, LLMRuntime):
+                runtime.check_deadline()
+            allowed_names = {tool.get("name") for tool in self.tools}
+            if name not in allowed_names:
+                result = {"output": f"[TOOL ERROR] Tool {name} is not enabled for this run"}
+            elif self.tool_executor is not None:
+                try:
+                    result = self.tool_executor(name, args)
+                except Exception as e:
+                    result = {"output": f"[TOOL ERROR] {type(e).__name__}: {e}"}
+            elif name == "spawn_sub_agent":
                 task = args.get("task", "")
                 context_info = args.get("context", "")
                 try:
@@ -545,6 +565,8 @@ class AgentLoop:
                 image_base64=image_b64,
                 media_type=image_media,
             ))
+            if isinstance(runtime, LLMRuntime):
+                runtime.check_deadline()
 
             # Check if agent is done — require confirmation on first attempt
             if result.get("done"):

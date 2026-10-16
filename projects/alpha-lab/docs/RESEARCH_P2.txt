@@ -1,0 +1,211 @@
+P2: US equity feature and signal laboratory
+==========================================
+
+Scope
+-----
+P2 adds a fixed local signal-diagnostic path alongside the P1 legacy evaluator.
+It does not introduce a second portfolio P&L engine. P3 still owns share/cash/
+corporate-action accounting, financing/borrow and the equity-risk adapter.
+All P2 computation is CPU float64 with explicit fixed threads and seeds. There
+are no provider/LLM calls, arbitrary expressions, custom Python or agent loops.
+
+Use the environment's Python directly on native Windows:
+  C:\Users\jerry\Prisma\.venv\Scripts\python.exe -m alpha_lab.research.cli --help
+The generated console EXE may be blocked by Windows Application Control. The
+module invocation is supported; no security-policy bypass is needed.
+
+Contracts and availability
+-------------------------
+Start from a validated P1 materialized development bundle. Actual observations,
+source hashes, stable share-class identities, sessions and dates are checked.
+Folds cannot exceed the bundle or 2022-12-31. These are application checks and a
+filtered subprocess environment, not OS file/network isolation. The original
+2023-2025 holdout is already observed evidence and must not be used for tuning.
+
+The fixed catalog contains the ten legacy prepared price/fundamental columns.
+signal-catalog exposes units, dependencies, source and availability policies.
+P2 consumes those formulas; it does not rebuild the raw vendor panel or certify
+point-in-time history. Bundles retain the static metadata, monthly membership,
+price, cap and liquidity screens of the legacy panel. REIT/issuer applicability,
+historical arrival, revisions, eligibility and terminal settlement remain open.
+
+Each raw feature artifact retains every source member, security ID/date, value,
+availability flag, reason and information date. Price features require no filing
+values. Fundamental features require filing+2 calendar days, an internally
+consistent available_date <= decision date, and available-information age<=550
+calendar days. Undated, future, stale and missing inputs stay missing, with their
+reason. These are reconstruction assumptions, not historical vendor arrival.
+
+Cache IDs include the pinned bundle, feature definition/version, feature and
+contract implementation hashes and numerical package versions. OS-held per-ID
+locks prevent simultaneous publication. UUID staging folders publish by rename;
+COMPLETE.json and hashes are required. Corruption fails rather than overwrites.
+Only raw features are cached. Fitted transforms belong to a fold/attempt. Each
+raw artifact is capped at the study's max_output_bytes; cache accumulation across
+studies is not a global disk quota and failed staging evidence is retained.
+
+Labels and folds
+----------------
+Every study declares one horizon, entry lag (at least one session), label
+availability lag, and total-return or simple_excess_spy target. For decision t,
+entry e=t+lag is a CLOSE. The horizon label compounds returns e+1 through e+h.
+Simple excess subtracts compounded SPY return; it is not relative wealth and SPY
+is a proxy for the S&P500, not the official index. Missing entry/path quotes or
+returns never become zeros. Bounds and availability censoring retain rows and
+explicit label statuses. Label units are decimal returns, scores are unitless.
+
+Training dates precede validation. A row can fit a transform only if its label
+is observed and BOTH outcome end and assumed availability strictly precede the
+first validation session minus the declared session embargo. The cutoff comes
+from the calendar, even if feature coverage is empty on that date. Validation
+windows do not overlap; training windows may expand. Whole sessions stay grouped.
+
+Supported transforms:
+  cross_sectional_rank: average percentile rank minus 0.5 on each feature's own
+    available source members per decision. No learned parameters.
+  train_zscore: per-feature mean and population standard deviation fitted only
+    to admitted training rows with that feature. Validation uses frozen stats.
+    A constant training input maps finite values to zero with an explicit flag;
+    absent training values produce missing transformed values, never a fallback.
+Raw feature, transform and score masks remain distinct. Fit diagnostics report
+candidate rows, purged labels, missing outcomes and per-feature fit counts/stats.
+
+Recipes and fingerprints
+------------------------
+Three baselines: value=(book yield+earnings yield); quality=(ROA+gross profitability
+-leverage); momentum=12-to-1 momentum. Linear coefficients are normalized by L1
+norm and rounded to 12 decimal places for BOTH computation and identity. Names,
+positive rescaling and zero terms cannot create a different trial.
+
+One additional fixed hypothesis: quality_scaled_momentum. Centered momentum rank
+is multiplied by 0.5 + (centered ROA rank + centered gross-profitability rank -
+centered leverage rank)/3. This nonnegative quality multiplier uses the fixed rank
+transform and coefficients; arbitrary nonlinear recipes are not accepted.
+
+Trial identity includes recipe, label, folds, source bundle, coverage/feature
+policy, diagnostics, seed/threads, code and environment. Display names, family,
+hypothesis and operational time/output/RAM budgets do not change it. The full
+resolved specification has a separate hash in each attempt. Comparison identity
+omits only the recipe and those display/operational fields. Changed sources,
+versions, label target/horizon, folds or numerical policies reject comparison.
+
+Registration, retries and exposure
+---------------------------------
+Use one local registry for related project studies. Do not create another ledger
+to reset search history. Explicit registry-init creates a new SQLite schema;
+unknown/existing files are never overwritten or implicitly migrated. SQLite
+transactions serialize family budgets, immutable hypotheses, parent links and
+attempt claims. The first registration's global attempt cap cannot be increased
+by renaming a family. Only unique computations count against a family's trial cap.
+
+Register the premise and tests BEFORE calculating diagnostics. A failed attempt
+can retry only with --retry-of identifying the last failed attempt, within the
+cap; it is a new attempt of the same trial. Completed or unresolved trials cannot
+be resubmitted. Reuse saved evidence. Related renamed registrations see the same
+global attempts. Families, hypotheses, registrations, parent links, events,
+attempts and exposures remain inspectable with registry-show. Budget changes
+require an explicit new linked study, never edits to prior rows.
+
+At admission, exposure records conservatively mark the entire pinned bundle's
+development access period (not just the validation decision dates)
+with unresolved possible results. Failures retain possible partial-result
+exposure. Completion links the exact result manifest hash. registry-exposure
+imports previously observed periods using an immutable declaration and a
+hash-verified local evidence file (it hashes bytes, without reevaluating results).
+Include the original observed holdout and prior development results in the
+project ledger; a new name does not make any period unexamined. This is research
+lineage under the same user, not a tamper-proof authorization service.
+
+File publication and SQLite are separate transactions. Files complete first;
+then the ledger completes. After interruption, inspect the saved path and use
+signal-reconcile. It validates identity/hashes/path before updating the ledger.
+Ambiguous running/no-marker outcomes remain unresolved and block duplicates;
+there is no forced reset, automatic retry or campaign resume. Failed submissions
+before admission may retain an INCOMPLETE intent directory without a run record.
+
+Diagnostics and interpretation
+------------------------------
+predictions.parquet retains every source member in each fold's train/validation
+dates, raw features/masks/reasons, transforms/fit membership, score, bucket and
+observed/missing labels. Training rows may repeat across expanding folds.
+daily.parquet and quantiles.parquet contain validation diagnostics only:
+  - source/feature/score/label/paired counts;
+  - Spearman rank IC, with insufficient or constant sections explicit;
+  - quantile forward labels and counts, including empty/tied buckets;
+  - score rank autocorrelation, overlap and top-membership entrants/exits/churn.
+Buckets are assigned on ALL scored names BEFORE future-label filtering. Equal
+scores stay together; some buckets can be empty. Top churn is 1 minus shared top
+names divided by prior top count. Observed labels are used only for the reported
+outcome statistics; no complete-future-universe filter is introduced.
+
+fits.json, metrics.json, runtime.json and report.txt record policies, fit evidence,
+fold summaries and limitations. Means are descriptive, not IID significance
+claims; overlapping forward outcomes and repeated securities create dependence.
+Quantile spreads are not investable P&L. No fees, short availability, borrow,
+funding, position drift, sector neutrality, capacity or acceptance is established.
+signal-compare verifies completed artifacts and compatibility before reporting
+per-fold summaries and pairwise per-session score correlations/coverage. It uses
+the declared minimum cross section and does not filter scores by future labels,
+rank winners or select another strategy.
+
+Execution controls
+------------------
+signal-run uses the P1 owned process tree and allowlisted environment. Provider
+keys and proxies are excluded; CPU visibility, thread counts and seed are set.
+Trusted fixed code receives only the development bundle and raw cache. Parent
+checks wall time, run output bytes and sampled tree RSS, terminating its owned
+process on failure. These are not hard OS RAM limits or secret/file ACLs. No
+strong same-user security isolation is claimed. Parent bundle validation and
+inspection also use RAM; the worker RSS bound does not cover the parent process.
+Cache size caps are separate from the run artifact cap and there are at most ten
+requested raw features per study. Output publication verifies schemas, row
+coverage, hashes, source/code/environment identity and runtime evidence. A zero
+exit without the complete artifact set is failure. Inspection never executes
+workers or loads dotenv; read-only SQLite may maintain its normal shared-WAL
+auxiliary files but cannot change ledger rows.
+
+Minimal command sequence (PowerShell)
+-------------------------------------
+Set $py, $bundle, $root to your environment, materialized bundle and NEW study
+directory, respectively. Keep runs/cache outside the bundle in separate trees.
+Review every parameter in examples/research/p2-momentum-request.json; these are
+intentional example choices, not permanent research/LLM defaults.
+
+  & $py -m alpha_lab.research.cli registry-init "$root/registry.sqlite"
+  & $py -m alpha_lab.research.cli signal-spec --bundle $bundle `
+      --request examples/research/p2-momentum-request.json --output "$root/momentum-spec.json"
+  & $py -m alpha_lab.research.cli signal-register --bundle $bundle `
+      --spec "$root/momentum-spec.json" --registry "$root/registry.sqlite" `
+      --family examples/research/p2-family.json `
+      --hypothesis examples/research/p2-momentum-hypothesis.json
+  & $py -m alpha_lab.research.cli signal-check --bundle $bundle --spec "$root/momentum-spec.json"
+  & $py -m alpha_lab.research.cli signal-run --bundle $bundle `
+      --spec "$root/momentum-spec.json" --registry "$root/registry.sqlite" `
+      --cache "$root/cache" --output "$root/momentum-run"
+  & $py -m alpha_lab.research.cli signal-inspect "$root/momentum-run"
+  & $py -m alpha_lab.research.cli registry-show "$root/registry.sqlite"
+
+Use signal-catalog to obtain the other fixed recipes. Resolve each with its own
+hypothesis and the SAME declared folds/label/diagnostic controls. Register all
+four BEFORE running any of them; link the quality-scaled hypothesis to the
+momentum trial using signal-register --parent <momentum trial ID>. Compare saved
+directories with signal-compare <run1> <run2> [...]. Avoid iterative performance
+tuning. Resource-only retries retain the same trial identity and explicit cap.
+
+Validation and rollback
+-----------------------
+tests/test_signal_lab.py checks hand-derived entry-close labels, missing paths,
+censoring, independent feature gates, future-outcome invariance, fold-local fits,
+overlap/availability purging, equivalent trials and compatibility identities.
+tests/test_research_registry.py checks independent-process claims/budgets/cache
+locks, parent/retry lineage, prior exposure and publication/SQLite crash gaps,
+resource failures and native child execution. P1 tests continue to protect its
+unchanged evaluator path. These validate software behavior, not economic alpha.
+
+Preserve versioned bundles, raw caches, resolved specs, attempts and the registry.
+Do not overwrite artifacts after code/environment changes. Resolve new studies
+under changed identities, recording their relationship; archived inspect stays
+available without requiring current-code equality. For rollback, use the P1
+spec/run/inspect commands and unchanged legacy adapter; do not pool legacy P&L
+and P2 diagnostics or rewrite the frozen selection/holdout files. No sibling
+equity-risk files are part of this milestone.

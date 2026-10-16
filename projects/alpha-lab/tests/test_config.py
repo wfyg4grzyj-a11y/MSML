@@ -101,7 +101,7 @@ class TestLoadConfig:
     def test_load_invalid_yaml(self, tmp_path: Path) -> None:
         config_file = tmp_path / "config.yaml"
         config_file.write_text("just a string")
-        with pytest.raises(ValueError, match="YAML mapping"):
+        with pytest.raises(ValueError, match="must be a mapping"):
             load_config(str(config_file))
 
     def test_load_strips_whitespace(self, tmp_path: Path) -> None:

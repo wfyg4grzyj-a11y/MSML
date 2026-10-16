@@ -31,9 +31,14 @@ alpha-lab-serve = "alpha_lab.server:serve_main"
 alpha-lab-data = "alpha_lab.market_data.pipeline:main"
 alpha-lab-tiingo = "alpha_lab.market_data.cli:main"
 alpha-lab-sharadar = "alpha_lab.market_data.sharadar_cli:main"
+alpha-lab-equity = "alpha_lab.equity_pilot:main"
+alpha-lab-research = "alpha_lab.research.cli:main"
 
 [project.optional-dependencies]
 risk-data = ["exchange-calendars>=4.11,<5"]
+equity-research = ["numpy>=1.26,<3", "pandas>=2.2,<4", "scipy>=1.14,<2", "exchange-calendars>=4.11,<5"]
+risk-tools = ["prisma-equity-risk==0.2.0"] # Install the sibling project's tested wheel locally first.
+factor-research = ["numpy>=1.26,<3", "pandas>=2.2,<4", "scipy>=1.14,<2", "exchange-calendars>=4.11,<5", "clarabel>=0.11,<0.12"]
 
 [build-system]
 requires = ["hatchling"]
@@ -41,6 +46,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/alpha_lab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["data", "workspace", "workspaces", "frontend", ".*", "build", "dist", "*.egg"]
 
 [dependency-groups]
 dev = [

@@ -24,10 +24,11 @@ def setup_server(tmp_workspace: str) -> None:
 
     import alpha_lab.server as srv
     srv._workspace = tmp_workspace
-    srv._config_path = None
     srv.event_history.clear()
-    srv.manager = srv.AgentManager()
+    srv.manager = srv.DashboardState()
+    srv.manager.workspace = tmp_workspace
     srv.manager.db = None
+    srv._adapter_cache.clear()
 
 
 def get_client():
@@ -44,22 +45,21 @@ class TestStatusEndpoint:
         resp = client.get("/api/status")
         assert resp.status_code == 200
         data = resp.json()
-        assert "running" in data
-        assert data["running"] is False
-        assert data["has_config"] is False
+        assert data == {"workspace":tmp_workspace}
 
 
 class TestStartStopEndpoints:
     def test_start_without_config(self, tmp_workspace: str) -> None:
         client = get_client()
         resp = client.post("/api/start")
-        assert resp.status_code == 400
-        assert "view-only" in resp.json()["error"].lower()
+        # The dashboard is a viewer; pipeline commands run through run.py.
+        # A built frontend's static mount rejects unsupported POSTs with 405.
+        assert resp.status_code in {404, 405}
 
     def test_stop(self, tmp_workspace: str) -> None:
         client = get_client()
         resp = client.post("/api/stop")
-        assert resp.status_code == 200
+        assert resp.status_code in {404, 405}
 
 
 class TestFilesEndpoint:
@@ -103,20 +103,11 @@ class TestFileEndpoint:
         assert resp.status_code == 404
 
     def test_path_traversal_blocked(self, tmp_workspace: str) -> None:
-        # Starlette normalizes path params, so ../../ gets stripped.
-        # Use URL-encoded %2e%2e%2f to bypass, or test with absolute path logic.
-        # The real protection is in the resolve().relative_to() check.
-        # Create a file outside workspace and try to reach it via symlink.
-        import os
+        # Encoded traversal reaches the handler without requiring Windows symlinks.
         outside = Path(tmp_workspace).parent / "secret.txt"
         outside.write_text("secret data")
-        link = Path(tmp_workspace) / "escape"
-        try:
-            link.symlink_to(outside.parent)
-        except OSError:
-            pytest.skip("Cannot create symlinks")
         client = get_client()
-        resp = client.get("/api/file/escape/secret.txt")
+        resp = client.get("/api/file/%2e%2e%2fsecret.txt")
         # Should be blocked (403) because resolved path is outside workspace
         assert resp.status_code == 403
 
@@ -143,8 +134,7 @@ class TestHealthEndpoint:
         assert data["status"] == "ok"
         assert "uptime_seconds" in data
         assert "components" in data
-        assert "dispatcher" in data["components"]
-        assert "strategist" in data["components"]
+        assert set(data["components"]) == {"database","metrics"}
         assert "database" in data["components"]
         assert "metrics" in data["components"]
 

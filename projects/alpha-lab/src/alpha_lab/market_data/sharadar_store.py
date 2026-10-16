@@ -22,6 +22,17 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def observation_time(value):
+    """Archive knowledge time requires an explicit timezone, never a trade date."""
+    try:
+        stamp = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            raise ValueError
+        return stamp.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        raise SharadarError("Observation cutoff requires an ISO timestamp with timezone") from None
+
+
 def identifier(name):
     if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
         raise SharadarError("Invalid column name")
@@ -103,6 +114,49 @@ class SharadarStore:
 
     def summary(self, tables):
         return [{"table": table_name(t), "snapshot": self.latest(t)} for t in tables]
+
+    def asof(self, table, observed_before):
+        """Select only data our archive had observed by the specified instant.
+
+        Historical vendor record dates do not backdate local knowledge. This
+        supports forward vintage replay from our first capture, not a historical
+        vendor-feed attestation before capture. No fallback to a newer snapshot.
+        """
+        table = table_name(table)
+        cutoff = observation_time(observed_before)
+        directory = self.root / "tables" / table
+        eligible = []
+        if not directory.exists():
+            return None
+        for base in directory.iterdir():
+            if not re.fullmatch(r"[a-f0-9]{32}", base.name) or not base.is_dir():
+                continue
+            try:
+                if base.resolve().parent != directory.resolve():
+                    raise ValueError
+                manifest = json.loads((base / "manifest.json").read_text(encoding="utf-8"))
+                observed = observation_time(manifest["retrieved_at"])
+                data = base / "data.parquet"
+                if manifest["table"] != table or not data.is_file() or data.resolve().parent != base.resolve():
+                    raise ValueError
+                if not re.fullmatch(r"[a-f0-9]{64}", manifest["parquet_sha256"]):
+                    raise ValueError
+            except (OSError, ValueError, KeyError, TypeError, SharadarError):
+                raise SharadarError("Invalid archived snapshot evidence; observation selection refused") from None
+            if observed <= cutoff:
+                eligible.append((observed, base, manifest))
+        if not eligible:
+            return None
+        newest = max(item[0] for item in eligible)
+        winners = [item for item in eligible if item[0] == newest]
+        if len(winners) != 1:
+            raise SharadarError("Ambiguous archived observation time; choose and reconcile source evidence")
+        _, base, manifest = winners[0]
+        data = base / "data.parquet"
+        if file_hash(data) != manifest["parquet_sha256"]:
+            raise SharadarError("Archived snapshot hash mismatch")
+        return manifest | {"version": base.name, "path": str(data),
+                           "observation_cutoff": cutoff.isoformat()}
 
     def sync(self, client, table, *, force=False, progress=None, event=None):
         with self._writer_lock():
@@ -210,12 +264,13 @@ class SharadarStore:
                     raise SharadarError("Refusing to remove an unexpected staging directory")
                 shutil.rmtree(resolved_stage)
 
-    def export(self, table, destination, *, tickers=None, start=None, end=None, dimension=None, columns=None, routing=None):
+    def export(self, table, destination, *, tickers=None, start=None, end=None, dimension=None, columns=None, routing=None, observed_before=None):
         """Offline filtered CSV with provenance; never overwrite an existing export."""
         table = table_name(table)
-        snapshot = self.latest(table)
+        snapshot = self.asof(table, observed_before) if observed_before is not None else self.latest(table)
         if snapshot is None:
-            raise SharadarError("Table has not been downloaded yet")
+            raise SharadarError("No archived snapshot available by observation cutoff" if observed_before is not None
+                                else "Table has not been downloaded yet")
         names = [c["name"] for c in snapshot["schema"]["columns"]]
         selected = columns or names
         if not selected or not set(selected).issubset(names) or len(set(selected)) != len(selected):
@@ -262,6 +317,12 @@ class SharadarStore:
             manifest = {"provider": "sharadar.com", "table": table, "source_version": snapshot["version"],
                         "source": snapshot["source"], "created_at": utc_now(), "sha256": file_hash(destination),
                         "filters": {"tickers": tickers, "start": start, "end": end, "dimension": dimension}, "columns": selected}
+            if observed_before is not None:
+                manifest.update(observation_cutoff=snapshot["observation_cutoff"],
+                                source_retrieved_at=snapshot["retrieved_at"],
+                                source_parquet_sha256=snapshot["parquet_sha256"],
+                                observation_basis="Completed local capture; distinct from historical record dates",
+                                point_in_time=False)
             if routing is not None:
                 manifest["routing"] = routing
             if table in {"stocks", "funds"}:

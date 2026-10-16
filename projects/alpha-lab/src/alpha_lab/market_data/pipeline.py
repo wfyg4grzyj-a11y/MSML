@@ -12,17 +12,19 @@ from dotenv import load_dotenv
 
 from .cli import export_snapshot, load_config as load_tiingo_config
 from .routing import catalog, select_route
+from .routing import ARRAYS_EXTRA_DATASETS
 from .sharadar import SharadarClient, SharadarError
 from .sharadar_cli import load_config as load_sharadar_config
 from .store import MarketStore
 from .sync import sync_ticker
 from .tiingo import TiingoClient, TiingoError, ticker_symbol
+from .arrays import ArraysError, arrays_request
 
 
 def load_config(path):
     path = Path(path).resolve()
     raw = json.loads(path.read_text(encoding="utf-8-sig"))
-    if not isinstance(raw, dict) or set(raw) - {"sharadar_config", "tiingo_config", "tickers"}:
+    if not isinstance(raw, dict) or set(raw) - {"sharadar_config", "tiingo_config", "arrays_config", "tickers"}:
         raise SharadarError("Invalid pipeline configuration; API keys belong in .env")
     tickers = raw.get("tickers", [])
     if not isinstance(tickers, list) or any(not isinstance(t, str) for t in tickers):
@@ -40,8 +42,17 @@ def emit_event(value):
 
 
 def sync_pipeline(store, tables, rate, tiingo, tickers, *, dataset=None, start=None, end=None,
-                  asset_table=None, force=False, emit=emit_event):
+                  asset_table=None, force=False, emit=emit_event, arrays_pipeline_config=None,
+                  metrics='EPS', period_type='quarterly', fiscal_year=None, fiscal_quarter=None):
     """Update primary tables before inspecting availability; fail closed on errors."""
+    if dataset in ARRAYS_EXTRA_DATASETS:
+        if len(tickers) != 1 or arrays_pipeline_config is None:
+            raise ArraysError('Arrays requires one explicit ticker and pipeline config')
+        route = select_route(store,dataset,ticker=tickers[0],start=start,end=end,asset_table=asset_table)
+        result = arrays_request(store,arrays_pipeline_config,route,'sync',start=start,end=end,
+                                metrics=metrics,period_type=period_type,fiscal_year=fiscal_year,fiscal_quarter=fiscal_quarter)
+        emit(json.dumps(result))
+        return [route]
     end = end or (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     if start and start > end:
         raise SharadarError("Start date must precede end date")
@@ -93,6 +104,10 @@ def main(argv=None):
         child.add_argument("--start-date", type=date.fromisoformat)
         child.add_argument("--end-date", type=date.fromisoformat)
         child.add_argument("--asset-table", choices=["stocks", "funds"])
+        child.add_argument("--metrics", default="EPS", help="Arrays forecast metrics, comma-separated")
+        child.add_argument("--period-type", choices=["annual","quarterly","semi-annual"], default="quarterly")
+        child.add_argument("--fiscal-year", type=int)
+        child.add_argument("--fiscal-quarter", choices=["Q1","Q2","Q3","Q4"])
         if command == "sync":
             child.add_argument("--env-file", type=Path, default=Path(".env"))
             child.add_argument("--full-refresh", action="store_true")
@@ -114,6 +129,23 @@ def main(argv=None):
                    tickers if args.dataset in {None, "daily_prices"} else [])
         start = args.start_date.isoformat() if args.start_date else None
         end = args.end_date.isoformat() if args.end_date else None
+        if args.dataset in ARRAYS_EXTRA_DATASETS:
+            if len(tickers) != 1:
+                raise ArraysError("Arrays requires exactly one explicit US-equity ticker")
+            if args.command == 'export' and (args.dimension or args.columns):
+                raise ArraysError("Arrays exports its native schema; dimension/columns are unsupported")
+            route = select_route(store,args.dataset,ticker=tickers[0],start=start,end=end,asset_table=args.asset_table)
+            if args.command == 'route':
+                print(json.dumps([route.manifest()],indent=2))
+                return 0
+            if args.command == 'sync':
+                load_dotenv(args.env_file,override=False)
+            result = arrays_request(store,args.config,route,args.command,
+                                    output=args.output if args.command == 'export' else None,
+                                    start=start,end=end,metrics=args.metrics,period_type=args.period_type,
+                                    fiscal_year=args.fiscal_year,fiscal_quarter=args.fiscal_quarter)
+            print(json.dumps(result,indent=2))
+            return 0
         if args.dataset in {None, "daily_prices"} and not tickers:
             raise SharadarError("Configure tickers or supply --ticker")
         if args.command == "sync":
@@ -146,7 +178,7 @@ def main(argv=None):
                 result = export_snapshot(cache, args.output, [route.ticker], start, end, routing=route.manifest())
         print(json.dumps(result, indent=2))
         return 0
-    except (SharadarError, TiingoError) as exc:
+    except (SharadarError, TiingoError, ArraysError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except (OSError, ValueError, KeyError, TypeError, duckdb.Error):

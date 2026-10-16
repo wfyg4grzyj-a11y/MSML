@@ -158,6 +158,14 @@ class TestReviewPasses:
         self._write_review(pipeline.workspace, "Review done.\n\nPASS\n")
         assert pipeline._review_passes() is True
 
+    def test_last_verdict_controls_revised_review(self, pipeline: Pipeline) -> None:
+        self._write_review(pipeline.workspace, "Verdict: PASS\nReinspection found errors.\nFinal verdict: NEEDS FIXES\n")
+        assert pipeline._review_passes() is False
+
+    def test_fenced_example_is_not_a_verdict(self, pipeline: Pipeline) -> None:
+        self._write_review(pipeline.workspace, "Example format:\n```\nVERDICT: PASS\n```\nReview still incomplete.")
+        assert pipeline._review_passes() is False
+
 
 # ---------------------------------------------------------------------------
 # Test pass detection

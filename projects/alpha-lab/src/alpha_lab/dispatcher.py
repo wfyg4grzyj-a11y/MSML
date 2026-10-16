@@ -28,9 +28,11 @@ from alpha_lab.events import (
     PhaseEvent,
 )
 from alpha_lab.experiment_db import Experiment, ExperimentDB
+from alpha_lab.llm_runtime import LLMRunError, LLMRuntime
 from alpha_lab.provider import Provider
 from alpha_lab.strategist import Strategist
 from alpha_lab.worker import Worker
+from alpha_lab.workspace_lock import WorkspaceLock
 
 
 class JobExecutor(Protocol):
@@ -78,6 +80,7 @@ class CPUExecutor(Protocol):
 logger = logging.getLogger("alpha_lab.dispatcher")
 
 POLL_INTERVAL = 10  # seconds
+_UNKNOWN_JOB_ERROR = "Job state UNKNOWN; reconcile its process/job identity before retry."
 
 
 class Dispatcher:
@@ -96,6 +99,7 @@ class Dispatcher:
         cpu_executor: CPUExecutor | None = None,
         adapter: object | None = None,
         supervisor: object | None = None,
+        workspace_lock: WorkspaceLock | None = None,
     ) -> None:
         self.provider = provider
         self.config = config
@@ -108,6 +112,8 @@ class Dispatcher:
         self.adapter = adapter
         self.supervisor = supervisor
         self._stop_requested = False
+        self._workspace_lock = workspace_lock
+        self._run_lock = threading.Lock()
         # Track which jobs are CPU vs GPU for polling
         self._cpu_job_ids: set[str] = set()
 
@@ -196,6 +202,31 @@ class Dispatcher:
             except (OSError, TypeError, ValueError) as e:
                 logger.warning("Failed to write dispatcher log entry: %s", e)
 
+    def _bounded_runtime(self) -> LLMRuntime | None:
+        runtime = getattr(self.provider, "runtime", None)
+        return runtime if isinstance(runtime, LLMRuntime) else None
+
+    def _can_start_runtime_work(self) -> bool:
+        runtime = self._bounded_runtime()
+        if runtime is not None:
+            runtime.check_deadline()
+            return runtime.stop_reason() is None
+        return True
+
+    def _runtime_work_active(self, runtime: LLMRuntime) -> bool:
+        with self._state_lock:
+            strategist_running = self._strategist_running
+        return strategist_running or any(w.busy for w in self.workers) or runtime.request_active
+
+    def _wait_for_next_poll(self) -> None:
+        for _ in range(POLL_INTERVAL):
+            if self._stop_requested:
+                break
+            runtime = self._bounded_runtime()
+            if runtime is not None:
+                runtime.check_deadline()
+            time.sleep(1)
+
     def emit(self, event: AgentEvent) -> None:
         self.event_callback(event)
         # Also log to dispatcher JSONL
@@ -235,17 +266,21 @@ class Dispatcher:
                 logger.warning("Failed to cleanup CPU executor: %s", e)
 
         self._cleanup()
+        if self._workspace_lock is not None:
+            threads = [w._thread for w in self.workers if w._thread is not None]
+            if self._strategist_thread is not None:
+                threads.append(self._strategist_thread)
+            self._workspace_lock.retain_until(threads)
 
     def _cleanup(self) -> None:
-        """Release all remaining worker assignments and close log file."""
-        for status in ("to_implement", "implemented", "finished"):
-            try:
-                assigned = self.db.list_by_status(status)
-                for exp in assigned:
-                    if exp.worker_id is not None:
-                        self.db.release_worker(exp.id)
-            except Exception as e:
-                logger.warning("Failed to release workers for status '%s' during cleanup: %s", status, e)
+        """Release this dispatcher's idle claims, retaining claims of live threads."""
+        idle_ids = {w.worker_id for w in self.workers if not w.busy}
+        try:
+            for exp in self.db.list_all():
+                if exp.worker_id in idle_ids:
+                    self.db.release_worker(exp.id, worker_id=exp.worker_id, updated_at=exp.updated_at)
+        except Exception as e:
+            logger.warning("Failed to release idle worker claims during cleanup: %s", e)
 
         if self._log_file is not None:
             try:
@@ -255,62 +290,81 @@ class Dispatcher:
             self._log_file = None
 
     def recover(self) -> dict:
+        """Exclude other workspace owners before releasing any orphaned claim."""
+        if self._workspace_lock is not None:
+            if not self._workspace_lock.held or self._workspace_lock.workspace != Path(self.workspace).resolve():
+                raise RuntimeError("Dispatcher requires its workspace's acquired ownership lock")
+            return self._recover_owned()
+        with WorkspaceLock(self.workspace):
+            return self._recover_owned()
+
+    def _recover_owned(self) -> dict:
         """Recover from a crash: release orphaned workers and reconcile SLURM jobs.
 
         Returns a summary dict of recovery actions taken.
         """
-        summary: dict = {"released_workers": 0, "slurm_reconciled": 0}
+        if any(worker.busy for worker in self.workers):
+            raise RuntimeError("Recovery is only valid before workers start")
+        summary: dict = {"released_workers": 0, "slurm_reconciled": 0, "unresolved_submissions": 0}
 
         # 1. Release orphaned worker assignments (no workers exist yet at startup)
-        for status in ("to_implement", "implemented", "finished"):
-            assigned = self.db.list_by_status(status)
-            for exp in assigned:
-                if exp.worker_id is not None:
-                    logger.info(
-                        f"Recovery: releasing orphaned worker {exp.worker_id} "
-                        f"from experiment #{exp.id} {exp.name}"
-                    )
-                    self.db.release_worker(exp.id)
+        for exp in self.db.list_all():
+            if exp.worker_id is not None:
+                if self.db.release_worker(exp.id, worker_id=exp.worker_id, updated_at=exp.updated_at):
                     summary["released_workers"] += 1
 
         # 2. Reconcile SLURM jobs
         slurm_exps = self.db.list_by_status("queued", "running")
-        job_ids = [exp.slurm_job_id for exp in slurm_exps if exp.slurm_job_id]
-        if job_ids and self.executor is not None:
-            statuses = self.executor.poll_jobs(job_ids)
-            for exp in slurm_exps:
-                if not exp.slurm_job_id or exp.slurm_job_id not in statuses:
-                    continue
-                slurm_status = statuses[exp.slurm_job_id]
-
-                if slurm_status == "RUNNING" and exp.status == "queued":
-                    self.db.update_status(exp.id, "running", started_at=time.time())
-                    logger.info(f"Recovery: #{exp.id} queued -> running (SLURM RUNNING)")
-                    summary["slurm_reconciled"] += 1
-
-                elif slurm_status == "COMPLETED":
-                    self.db.update_status(exp.id, "finished", finished_at=time.time())
-                    logger.info(f"Recovery: #{exp.id} {exp.status} -> finished (SLURM COMPLETED)")
-                    summary["slurm_reconciled"] += 1
-
-                elif slurm_status in ("FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY"):
-                    self.db.set_error_and_finish(exp.id, f"SLURM {slurm_status}")
-                    logger.info(f"Recovery: #{exp.id} {exp.status} -> finished (SLURM {slurm_status})")
-                    summary["slurm_reconciled"] += 1
-
-                elif slurm_status == "PENDING":
-                    pass  # Leave as queued
-
-                elif slurm_status == "UNKNOWN":
-                    self.db.set_error_and_finish(exp.id, "SLURM job lost")
-                    logger.info(f"Recovery: #{exp.id} {exp.status} -> finished (SLURM job lost)")
-                    summary["slurm_reconciled"] += 1
+        for exp in slurm_exps:
+            if not exp.slurm_job_id:
+                summary["unresolved_submissions"] += 1
+                if exp.status == "queued" and not exp.error:
+                    self.db.flag_submission(exp, "Submission identity unavailable; reconcile before retry.")
+                self._log("unresolved_submission", experiment_id=exp.id)
+            elif exp.slurm_job_id.startswith("cpu-"):
+                self._cpu_job_ids.add(exp.slurm_job_id)
+        # Native GPU executors can reattach only identity-verified local processes.
+        recover_jobs = getattr(self.executor, "recover_running_jobs", None)
+        if callable(recover_jobs):
+            recover_jobs(self.workspace, {
+                exp.slurm_job_id: exp.name for exp in slurm_exps
+                if exp.slurm_job_id and exp.slurm_job_id not in self._cpu_job_ids
+            })
+        recover_cpu = getattr(self.cpu_executor, "recover_running_jobs", None)
+        if callable(recover_cpu):
+            recover_cpu(self.workspace, {
+                exp.slurm_job_id: exp.name for exp in slurm_exps
+                if exp.slurm_job_id and exp.slurm_job_id in self._cpu_job_ids
+            })
+        self._poll_slurm()
+        summary["slurm_reconciled"] = sum(
+            self.db.get(exp.id).status != exp.status for exp in slurm_exps
+        )
 
         self._log("recovery", **summary)
         logger.info(f"Recovery complete: {summary}")
         return summary
 
-    def run(self) -> None:
+    def run(self) -> bool:
+        """Hold workspace ownership through recovery, execution and shutdown."""
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("Dispatcher is already running")
+        owned = self._workspace_lock is None
+        try:
+            if owned:
+                self._workspace_lock = WorkspaceLock(self.workspace).acquire()
+            if not self._workspace_lock.held or self._workspace_lock.workspace != Path(self.workspace).resolve():
+                raise RuntimeError("Dispatcher workspace ownership is unavailable")
+            try:
+                return self._run_owned()
+            finally:
+                self.stop()
+        finally:
+            if owned and self._workspace_lock is not None:
+                self._workspace_lock.release()
+            self._run_lock.release()
+
+    def _run_owned(self) -> bool:
         """Main loop — blocks until stopped or max_experiments reached."""
         logger.info("Dispatcher starting")
         self._init_log()
@@ -326,15 +380,32 @@ class Dispatcher:
         # Ensure experiments directory exists
         Path(self.workspace, "experiments").mkdir(parents=True, exist_ok=True)
 
-        # Crash recovery before entering main loop
+        terminal_status = "failed"
+        terminal_detail = "Phase 3 experiment loop failed"
         try:
-            self.recover()
-        except Exception as e:
-            logger.error(f"Recovery failed: {e}")
-            self._log("recovery_error", error=str(e))
+            # Recovery must succeed before any new worker/API/submission work.
+            try:
+                self.recover()
+            except Exception as e:
+                logger.error(f"Recovery failed: {e}")
+                self._log("recovery_error", error=str(e))
+                raise
 
-        try:
             while not self._stop_requested:
+                runtime = self._bounded_runtime()
+                reason = runtime.stop_reason() if runtime is not None else None
+                if reason is not None:
+                    if reason != "deadline" and self._runtime_work_active(runtime):
+                        # Let the admitted response finish its local tools, but
+                        # admit no further agents, reports or experiment jobs.
+                        self._poll_slurm()
+                        self._emit_board_summary()
+                        self._wait_for_next_poll()
+                        continue
+                    if reason != "deadline" and self._should_terminate():
+                        break  # Last allowed response already completed the board.
+                    runtime.check_active()
+
                 # 1. Strategist turn (if due)
                 if self._should_run_strategist():
                     self._run_strategist()
@@ -373,31 +444,41 @@ class Dispatcher:
                     break
 
                 # Sleep (interruptible)
-                for _ in range(POLL_INTERVAL):
-                    if self._stop_requested:
-                        break
-                    time.sleep(1)
+                self._wait_for_next_poll()
 
+            terminal_status = "stopped" if self._stop_requested else "completed"
+            terminal_detail = ("Phase 3 experiment loop stopped" if self._stop_requested
+                               else "Phase 3 experiment loop finished")
+        except KeyboardInterrupt:
+            terminal_status = "stopped"
+            terminal_detail = "Phase 3 experiment loop interrupted"
+            raise
         except Exception as e:
             logger.error(f"Dispatcher error: {e}")
             self._log("dispatcher_error", error=str(e), traceback=traceback.format_exc())
+            raise
         finally:
-            self._log("dispatcher_stop")
-            self.emit(PhaseEvent(
-                phase="phase3",
-                step="dispatcher",
-                status="completed",
-                detail="Phase 3 experiment loop finished",
-            ))
-            if self._log_file is not None:
-                try:
-                    self._log_file.close()
-                except OSError as e:
-                    logger.warning("Failed to close dispatcher log on shutdown: %s", e)
+            self._log("dispatcher_stop", status=terminal_status)
+            try:
+                self.emit(PhaseEvent(
+                    phase="phase3",
+                    step="dispatcher",
+                    status=terminal_status,
+                    detail=terminal_detail,
+                ))
+            finally:
+                if self._log_file is not None:
+                    try:
+                        self._log_file.close()
+                    except OSError as e:
+                        logger.warning("Failed to close dispatcher log on shutdown: %s", e)
             logger.info("Dispatcher stopped")
+        return terminal_status == "completed"
 
     def _should_run_strategist(self) -> bool:
         """Determine if it's time for a strategist turn."""
+        if self._stop_requested:
+            return False
         with self._state_lock:
             if self._strategist_running:
                 return False
@@ -433,6 +514,8 @@ class Dispatcher:
         one-shot LLM call with no feedback about what's working — testing
         the value of strategic planning vs naive proposals.
         """
+        if not self._can_start_runtime_work():
+            return
         with self._state_lock:
             self._strategist_running = True
 
@@ -564,6 +647,9 @@ Return ONLY the JSON array. No explanation."""
             messages=[{"role": "user", "content": prompt}],
             max_tokens=8000,
         )
+        runtime = self._bounded_runtime()
+        if runtime is not None:
+            runtime.check_deadline()
 
         # Parse response
         text = response.strip()
@@ -581,6 +667,8 @@ Return ONLY the JSON array. No explanation."""
             proposals = [proposals]
 
         for p in proposals[:batch_size]:
+            if runtime is not None:
+                runtime.check_deadline()
             name = _re.sub(r"[^a-zA-Z0-9_\-]", "_", str(p.get("name", "random")))[:80]
             desc = str(p.get("description", ""))
             hyp = str(p.get("hypothesis", ""))
@@ -601,8 +689,8 @@ Return ONLY the JSON array. No explanation."""
             return
 
         # Split into CPU and GPU jobs
-        cpu_job_ids = [jid for jid in job_ids if jid in self._cpu_job_ids]
-        gpu_job_ids = [jid for jid in job_ids if jid not in self._cpu_job_ids]
+        cpu_job_ids = [jid for jid in job_ids if jid in self._cpu_job_ids or jid.startswith("cpu-")]
+        gpu_job_ids = [jid for jid in job_ids if jid not in cpu_job_ids]
 
         # Poll both executors
         statuses: dict[str, str] = {}
@@ -610,12 +698,16 @@ Return ONLY the JSON array. No explanation."""
             statuses.update(self.executor.poll_jobs(gpu_job_ids))
         if cpu_job_ids and self.cpu_executor:
             statuses.update(self.cpu_executor.poll_jobs(cpu_job_ids))
+        for job_id in job_ids:
+            statuses.setdefault(job_id, "UNKNOWN")
 
         for exp in active:
             if not exp.slurm_job_id or exp.slurm_job_id not in statuses:
                 continue
 
             slurm_status = statuses[exp.slurm_job_id]
+            if slurm_status in ("PENDING", "RUNNING", "COMPLETED") and exp.error == _UNKNOWN_JOB_ERROR:
+                self.db.clear_matching_error(exp.id, _UNKNOWN_JOB_ERROR)
 
             if exp.status == "queued" and slurm_status == "RUNNING":
                 self.db.update_status(
@@ -648,7 +740,7 @@ Return ONLY the JSON array. No explanation."""
                 logger.info(f"Experiment #{exp.id} {exp.name}: {exp.status} -> finished")
 
             elif exp.status in ("queued", "running") and slurm_status in (
-                "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "UNKNOWN"
+                "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY"
             ):
                 self.db.set_error_and_finish(exp.id, f"SLURM {slurm_status}")
                 self.emit(ExperimentEvent(
@@ -662,6 +754,11 @@ Return ONLY the JSON array. No explanation."""
                 logger.warning(
                     f"Experiment #{exp.id} {exp.name}: SLURM {slurm_status}"
                 )
+            elif slurm_status == "UNKNOWN":
+                message = _UNKNOWN_JOB_ERROR
+                if exp.error != message:
+                    self.db.set_error(exp.id, message)
+                    self._log("unresolved_job", experiment_id=exp.id, job_id=exp.slurm_job_id)
 
     def _is_cpu_experiment(self, exp: Experiment) -> bool:
         """Check if an experiment should run on CPU based on its config."""
@@ -693,6 +790,8 @@ Return ONLY the JSON array. No explanation."""
         for exp in checked:
             if self._stop_requested:
                 break
+            if not self._can_start_runtime_work():
+                break
 
             # Determine which executor to use
             # CPU-only mode: route everything to CPU when no GPU executor
@@ -717,29 +816,56 @@ Return ONLY the JSON array. No explanation."""
                 logger.warning(f"No executor available for {exp.name}, skipping")
                 continue
 
+            if self._stop_requested:
+                break
+            if not self._can_start_runtime_work():
+                break
+            reservation = self.db.reserve_submission(exp)
+            if reservation is None:
+                continue  # Snapshot was pruned, changed, or claimed after listing.
+            job_id = None
             try:
-                job_id = executor.submit_experiment(exp, self.workspace)
+                if not self._can_start_runtime_work():
+                    self.db.flag_submission(reservation, "Run limit reached before submission; reconcile before retry.")
+                    break
+                job_id = executor.submit_experiment(reservation, self.workspace)
+                self._log("submission_returned", experiment_id=exp.id, job_id=job_id)
+                if not self.db.attach_submission(reservation, job_id):
+                    raise RuntimeError("Submission reservation changed before job attachment")
                 if use_cpu:
                     self._cpu_job_ids.add(job_id)
-                self.db.set_slurm_job(exp.id, job_id)
-                self.db.update_status(exp.id, "queued")
-                self.emit(ExperimentEvent(
-                    experiment_id=exp.id,
-                    name=exp.name,
-                    status="queued",
-                    prev_status="checked",
-                    slurm_job_id=job_id,
-                    detail=f"Submitted {executor_name} job {job_id}",
-                ))
-                logger.info(f"Experiment #{exp.id} {exp.name}: submitted as {executor_name} job {job_id}")
+            except LLMRunError:
+                self.db.flag_submission(reservation, "Run limit interrupted submission; reconcile before retry.")
+                raise
             except Exception as e:
-                logger.error(f"Failed to submit experiment #{exp.id}: {e}")
-                self.db.set_error_and_finish(exp.id, f"Submit failed: {e}")
+                logger.error("Submit failed for experiment #%s (%s)", exp.id, type(e).__name__)
+                if job_id:
+                    try:
+                        executor.cancel(job_id)
+                        self._log("submission_cancel_requested", experiment_id=exp.id, job_id=job_id)
+                    except Exception as cancel_error:
+                        self._log("submission_cancel_failed", experiment_id=exp.id, job_id=job_id,
+                                  error_type=type(cancel_error).__name__)
+                self.db.flag_submission(
+                    reservation, f"Submit failed ({type(e).__name__}); reconcile before retry."
+                )
+                continue
+            # Observer failures must not turn an already attached job into a failed submission.
+            self.emit(ExperimentEvent(
+                experiment_id=exp.id, name=exp.name, status="queued", prev_status="checked",
+                slurm_job_id=job_id, detail=f"Submitted {executor_name} job {job_id}",
+            ))
+            logger.info(f"Experiment #{exp.id} {exp.name}: submitted as {executor_name} job {job_id}")
 
     def _assign_workers(self) -> None:
         """Assign idle workers to pending tasks. Priority: fix > analyze > implement."""
         # First: release experiments assigned to workers that are no longer busy
         self._release_dead_assignments()
+
+        if self._stop_requested:
+            return
+        if not self._can_start_runtime_work():
+            return
 
         idle = [w for w in self.workers if not w.busy]
         if not idle:
@@ -757,11 +883,15 @@ Return ONLY the JSON array. No explanation."""
         ]
 
         for exp in fixable:
-            if not idle:
+            if not idle or self._stop_requested:
                 break
-            worker = idle.pop(0)
-            # Increment fix attempts before assigning
-            attempts = self.db.increment_fix_attempts(exp.id)
+            if not self._can_start_runtime_work():
+                break
+            worker = idle[0]
+            if worker.fix(exp) is False:
+                continue
+            idle.pop(0)
+            attempts = self.db.get(exp.id).fix_attempts
             logger.info(
                 f"Assigning {worker.worker_id} to fix #{exp.id} {exp.name} "
                 f"(attempt {attempts}/{MAX_FIX_ATTEMPTS})"
@@ -769,7 +899,6 @@ Return ONLY the JSON array. No explanation."""
             self._log("assign_worker", worker=worker.worker_id, task="fix",
                        experiment_id=exp.id, experiment_name=exp.name,
                        fix_attempt=attempts)
-            worker.fix(exp)
 
         # Priority 2: analyze finished experiments (with results or max fix attempts reached)
         unassigned_finished = [
@@ -778,15 +907,19 @@ Return ONLY the JSON array. No explanation."""
         ]
 
         for exp in unassigned_finished:
-            if not idle:
+            if not idle or self._stop_requested:
                 break
-            worker = idle.pop(0)
+            if not self._can_start_runtime_work():
+                break
+            worker = idle[0]
+            if worker.analyze(exp) is False:
+                continue
+            idle.pop(0)
             logger.info(
                 f"Assigning {worker.worker_id} to analyze #{exp.id} {exp.name}"
             )
             self._log("assign_worker", worker=worker.worker_id, task="analyze",
                        experiment_id=exp.id, experiment_name=exp.name)
-            worker.analyze(exp)
 
         # Priority 3: implement new experiments (include "implemented" stuck experiments)
         to_implement = self.db.list_by_status("to_implement", "implemented")
@@ -795,15 +928,19 @@ Return ONLY the JSON array. No explanation."""
         ]
 
         for exp in unassigned_impl:
-            if not idle:
+            if not idle or self._stop_requested:
                 break
-            worker = idle.pop(0)
+            if not self._can_start_runtime_work():
+                break
+            worker = idle[0]
+            if worker.implement(exp) is False:
+                continue
+            idle.pop(0)
             logger.info(
                 f"Assigning {worker.worker_id} to implement #{exp.id} {exp.name}"
             )
             self._log("assign_worker", worker=worker.worker_id, task="implement",
                        experiment_id=exp.id, experiment_name=exp.name)
-            worker.implement(exp)
 
     def _release_dead_assignments(self) -> None:
         """Release experiments assigned to workers that are no longer busy.
@@ -835,7 +972,7 @@ Return ONLY the JSON array. No explanation."""
                     self._log("release_dead_assignment",
                               experiment_id=exp.id, worker=exp.worker_id,
                               status=exp.status)
-                    self.db.release_worker(exp.id)
+                    self.db.release_worker(exp.id, worker_id=exp.worker_id, updated_at=exp.updated_at)
 
     def _check_stale(self) -> None:
         """Detect stale workers (>5min) and release their assignments.
@@ -852,7 +989,7 @@ Return ONLY the JSON array. No explanation."""
             logger.warning(
                 f"Stale worker on experiment #{exp.id} {exp.name} — releasing"
             )
-            self.db.release_worker(exp.id)
+            self.db.release_worker(exp.id, worker_id=exp.worker_id, updated_at=exp.updated_at)
 
     def _check_stuck_workers(self) -> None:
         """Detect workers with no events for >10 minutes (observability only)."""
@@ -888,6 +1025,8 @@ Return ONLY the JSON array. No explanation."""
         error_rate = len(errors) / max(len(all_finished), 1)
 
         if error_rate <= 0.4:
+            return
+        if not self._can_start_runtime_work():
             return
 
         logger.warning(
@@ -948,6 +1087,8 @@ Return ONLY the JSON array. No explanation."""
 
     def _maybe_generate_report(self) -> None:
         """Trigger a milestone report if enough experiments are done."""
+        if self._stop_requested:
+            return
         if self._report_in_progress:
             if self._report_worker is not None:
                 if self._report_worker.busy:
@@ -978,6 +1119,8 @@ Return ONLY the JSON array. No explanation."""
             idle = [w for w in self.workers if not w.busy]
             if not idle:
                 return  # all busy, try next cycle
+            if not self._can_start_runtime_work():
+                return
 
             self._report_number += 1
             worker = idle[0]
@@ -994,7 +1137,12 @@ Return ONLY the JSON array. No explanation."""
             # Ensure reports directory exists
             Path(self.workspace, "reports").mkdir(parents=True, exist_ok=True)
 
-            worker.generate_report(self._report_number, done_count)
+            if not self._can_start_runtime_work():
+                self._report_number -= 1
+                return
+            if worker.generate_report(self._report_number, done_count) is False:
+                self._report_number -= 1
+                return
             self._last_report_at_done_count = done_count
             self._report_in_progress = True
             self._report_worker = worker

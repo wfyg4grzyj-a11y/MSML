@@ -1,0 +1,131 @@
+US LARGE-CAP JKP FACTOR STUDY: CURRENT RESULTS
+================================================
+
+Status
+------
+
+The fixed 1999-03-31 through 2022-12-30 development study now has a
+registered, action-aware publication result.  V8 trial
+b5cf4fbd019eb498fbf285f3fca1f4b60e6cc4bb05cc64aec1046b775c809017,
+attempt d6f72729bb25494a9d316d2784c2a015, completed with verified result hash
+d17e0a533837147763b567d7e578a6138553416e4f2cc30b7496272a38c841b9.
+V7 remains immutable as the outcome-known technical predecessor.  The
+2023-2025 holdout was not read or evaluated.
+
+This remains outcome-known development evidence.  It is not independent
+validation, point-in-time attestation, an investment-ready backtest, or a basis
+for selecting factors or tuning the model.
+
+Factor coverage
+---------------
+
+The catalog contains 153 JKP characteristics in 13 themes.  Existing providers
+support 117 provisional reconstructions: 44 market-data factors and 73
+fundamental factors.  None is claimed to be an exact JKP/WRDS replication.  The
+remaining 36 are blocked:
+
+coskew_21d, earnings_variability, emp_gr1, eq_dur, eqnpo_12m, eqpo_me,
+fnl_gr1a, iskew_ff3_21d, iskew_hxz4_21d, ival_me, ivol_ff3_21d,
+ivol_hxz4_21d, kz_index, lnoa_gr1a, mispricing_mgmt, mispricing_perf,
+nfna_gr1a, ni_ar1, ni_inc8q, ni_ivol, niq_su, o_score, ocfq_saleq_std,
+ppeinv_gr1a, qmj, qmj_growth, qmj_prof, qmj_safety, rd5_at, resff3_12_1,
+resff3_6_1, sale_emp_gr1, saleq_su, taccruals_at, taccruals_ni, tangibility.
+
+The ideal factor/model output contains 3 scenarios x 118 series x 285 forward
+intervals, or 100,890 rows.  Strict action accounting has 21,402 complete rows
+of 33,630 (63.64%); each imputation sensitivity has 22,915 (68.14%).  No factor
+or MODEL series has a complete active history, so compounded return, CAGR and
+drawdown are intentionally omitted.  Missing intervals are never filled with
+zero.
+
+Conditional MODEL diagnostics
+-----------------------------
+
+These statistics use only complete ideal-model intervals.  They describe the
+uncapped analytical model before executable constraints, costs and realized
+stock-loan availability.
+
+Scenario                                      n/285   Ann. mean   Ann. vol   Mean/vol   Positive
+strict_standard_only                          165     14.263%     14.381%    0.992      58.18%
+imputed_zero_insolvency_last_mark_other       179     13.847%     14.386%    0.963      56.98%
+imputed_last_mark_all_unresolved              179     13.783%     14.394%    0.958      56.98%
+
+"Mean/vol" is annual arithmetic mean divided by annual sample volatility.  It
+is not labelled Sharpe because this ideal series has no defined cash return,
+executable cost path or realized borrow-cost series.
+
+Descriptively, the highest strict-scenario conditional annual arithmetic means
+were gp_at (13.62%), cash_at (12.24%), opex_at (12.15%), cop_at (11.81%) and
+gp_atl1 (11.40%).  The lowest were debt_me (-9.02%), aliq_at (-8.81%) and
+saleq_gr1 (-6.89%).  Their completion samples differ materially, so these ranks
+are not a selection result and must not be used to tune the holdout.
+
+Executable account reconstruction
+---------------------------------
+
+V8 implements signed raw-share terminal-action accounting and two sparse,
+reduce-only priority queues.  Every current-session terminal parent is
+permanently restricted before voluntary order execution, including a parent
+the account did not hold.  Stale action and risk exits are canceled.  Action
+recipients exit first; held names without frozen risk support exit second; an
+ordinary buffered or monthly batch follows only when the same security was not
+already due at that close.  Queued risk exits stay projected to zero and
+ineligible for alpha even if support later returns.  Published action and risk
+exit rows must reconcile to an earlier journal event and to reconstructed
+pre-trade holdings.  V8 contains zero trade-vector rows for a terminal parent on
+or after its terminal session in all three scenarios.
+
+The strict account is censored for 5,812 sessions and ends with 26 unresolved
+terminal names, so it has no final observed NAV or full-path return.  The two
+imputation sensitivities have 12 and 15 unresolved sessions and finish with no
+unresolved terminal names or raw claims.  Their final observed NAV estimates
+are $1,125,440.14 and $1,133,008.82 from a $1,000,000 start, but
+complete_path_return remains null because their histories contain unresolved
+gaps.  These endpoints are path-dependent sensitivity diagnostics, not valid
+strategy performance or bounds.
+
+The accepted replay contains 150/199/207 stock claims created across the three
+scenarios, 150/197/204 deliveries and action-recipient exit rows, and
+180/713/748 risk-orphan exit rows.  The event-count changes from V7 follow from
+the permanent terminal restriction and the resulting 23-year optimizer path;
+they are not a new signal or model selection.  Forward factor output is
+unchanged from the frozen parent/action methodology.  Registered action
+journal, daily, forward and trade-vector artifacts are byte-identical to the
+isolated engineering reproduction.  Monthly records differ only in
+solver_seconds.  Outcomes differ by one summary-only value at two ULP; daily,
+trade and event paths are unchanged.
+
+Artifacts
+---------
+
+- Complete per-factor metrics and coverage:
+  data/market/research/analysis/jkp-action-accounting-v4-summary-v2/
+- Registered V8 result:
+  data/market/research/jkp-action-accounting-v8/run/
+- Post-run verification:
+  data/market/research/jkp-action-accounting-v8/POST_RUN_VERIFICATION.json
+- Preserved registered V7 predecessor:
+  data/market/research/jkp-action-accounting-v7/run/
+- Superseded unregistered V6 protocol:
+  data/market/research/jkp-action-accounting-v6/SUPERSEDED_UNREGISTERED.json
+
+Validation
+----------
+
+The final focused factor/action/platform suite passed 83 tests.  The accepted
+V4 result and the registered V7 predecessor still re-inspect at their original
+result hashes.  The V8 registry has one completed V8 attempt and no V8 retry.
+The registered worker recorded zero holdout evaluations, zero provider calls
+and zero LLM calls.  No real trade was placed.
+
+Remaining data work
+-------------------
+
+Exact JKP replication still requires the stock-level source inputs and formula
+history not present in current providers.  Historical issuer identity,
+industry membership and action-known timing remain point-in-time unattested.
+Historical stock-borrow availability and realized borrow fees remain absent.
+Those data issues, and the 36 blocked characteristics, should be addressed in
+new immutable input bundles before any new strategy trial.  The untouched
+2023-2025 period must remain reserved until a separately approved final model
+and complete executable-account methodology are frozen.

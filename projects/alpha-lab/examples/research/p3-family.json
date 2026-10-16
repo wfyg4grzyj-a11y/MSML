@@ -1,0 +1,6 @@
+{
+  "family_id": "raw-ledger-reference-v1",
+  "premise": "Independent accounting and constrained portfolio integration on a synthetic development fixture, without performance-based strategy selection.",
+  "max_unique_trials": 1,
+  "max_attempts_per_trial": 2
+}

@@ -168,3 +168,153 @@ def test_gpu_recovery_checks_identity(tmp_path):
     finally:
         recovered.cleanup_all()
         manager.cleanup_all()
+
+
+def test_cpu_recovery_checks_identity_and_windows_job_membership(tmp_path):
+    manager = LocalCPUManager(max_parallel=1, time_limit_seconds=60)
+    recovered = LocalCPUManager(max_parallel=1, time_limit_seconds=60)
+    workspace, directory, experiment = prepare(tmp_path, "import time;from pathlib import Path;Path('ready').write_text('ready');time.sleep(120)")
+    try:
+        job = manager.submit_experiment(experiment, str(workspace))
+        until(lambda: (directory/'ready').exists())
+        metadata = directory/'cpu_job.json'
+        record = json.loads(metadata.read_text())
+        for altered in [dict(record, created=record['created']-1), dict(record, resource='gpu'),
+                        dict(record, workspace=str(tmp_path)), dict(record, job_id='other-invocation')]:
+            metadata.write_text(json.dumps(altered))
+            assert recovered.recover_running_jobs(str(workspace), {job: experiment.name}) == 0
+        if os.name == 'nt':
+            from alpha_lab.local_process import WindowsJob
+            other = WindowsJob()
+            try:
+                metadata.write_text(json.dumps(dict(record, job_name=other.name)))
+                assert recovered.recover_running_jobs(str(workspace), {job: experiment.name}) == 0
+            finally:
+                other.close()
+        metadata.write_text(json.dumps(record))
+        assert recovered.recover_running_jobs(str(workspace), {job: experiment.name}) == 1
+        assert recovered.recover_running_jobs(str(workspace), {job: experiment.name}) == 0
+        assert recovered.poll_jobs([job])[job] == 'RUNNING'
+        assert not recovered.can_submit()
+        recovered.cancel(job)
+        assert recovered.poll_jobs([job])[job] == 'CANCELLED'
+    finally:
+        recovered.cleanup_all()
+        manager.cleanup_all()
+
+
+@pytest.mark.parametrize('outcome', ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT'])
+def test_scoped_terminal_state_replays_after_executor_restart(manager, tmp_path, outcome):
+    resource = 'gpu' if isinstance(manager, LocalGPUManager) else 'cpu'
+    script = "import time;from pathlib import Path;Path('ready').write_text('ready');time.sleep(120)" if outcome in ['CANCELLED','TIMEOUT'] else (
+        "raise RuntimeError('synthetic expected failure')" if outcome == 'FAILED' else "print('synthetic completed')"
+    )
+    workspace, directory, experiment = prepare(tmp_path, script)
+    job = manager.submit_experiment(experiment, str(workspace))
+    if outcome in ['CANCELLED','TIMEOUT']:
+        until(lambda: (directory/'ready').exists())
+        if outcome == 'CANCELLED':
+            manager.cancel(job)
+        else:
+            manager.time_limit = 1
+            manager._jobs[job].start_time = time.time()-2
+            manager.poll_jobs([job])
+    assert until(lambda: finished(manager, job)) == outcome
+    fresh = LocalGPUManager(gpu_ids=[0]) if resource == 'gpu' else LocalCPUManager(max_parallel=1)
+    try:
+        assert fresh.recover_running_jobs(str(workspace), {job: experiment.name}) == 1
+        assert fresh.poll_jobs([job])[job] == outcome
+        assert fresh.can_submit()
+    finally:
+        fresh.cleanup_all()
+
+
+def test_completed_receipt_replays_before_original_executor_polled_and_rejects_wrong_id(tmp_path):
+    from alpha_lab.local_job_state import receipt_path
+    manager = LocalCPUManager(max_parallel=1, time_limit_seconds=60)
+    workspace, directory, experiment = prepare(tmp_path, "print('synthetic completed')")
+    try:
+        job = manager.submit_experiment(experiment, str(workspace))
+        until(lambda: manager._jobs[job].proc.poll() is not None)
+        receipt = receipt_path(directory, job)
+        assert receipt.exists()
+        fresh = LocalCPUManager()
+        assert fresh.recover_running_jobs(str(workspace), {job: experiment.name}) == 1
+        assert fresh.poll_jobs([job])[job] == 'COMPLETED'
+        wrong = json.loads(receipt.read_text())
+        wrong['job_id'] = 'unrelated-old-job'
+        receipt.write_text(json.dumps(wrong))
+        (directory/'local_exit_code.txt').write_text('0')
+        unverified = LocalCPUManager()
+        assert unverified.recover_running_jobs(str(workspace), {job: experiment.name}) == 0
+        assert unverified.poll_jobs([job])[job] == 'UNKNOWN'
+    finally:
+        manager.cleanup_all()
+
+
+def test_recovered_process_exit_without_matching_receipt_stays_unknown(tmp_path):
+    manager = LocalCPUManager(max_parallel=1, time_limit_seconds=60)
+    recovered = LocalCPUManager(max_parallel=1, time_limit_seconds=60)
+    workspace, directory, experiment = prepare(tmp_path, "import time;from pathlib import Path;Path('ready').write_text('ready');time.sleep(120)")
+    try:
+        job = manager.submit_experiment(experiment, str(workspace))
+        until(lambda: (directory/'ready').exists())
+        assert recovered.recover_running_jobs(str(workspace), {job: experiment.name}) == 1
+        manager._jobs[job].proc.terminate_tree()
+        (directory/'local_exit_code.txt').write_text('0')
+        assert recovered.poll_jobs([job])[job] == 'UNKNOWN'
+    finally:
+        recovered.cleanup_all()
+        manager.cleanup_all()
+
+
+def test_recovery_does_not_extend_the_original_timeout(tmp_path):
+    manager = LocalCPUManager(max_parallel=1, time_limit_seconds=1)
+    recovered = LocalCPUManager(max_parallel=1, time_limit_seconds=3600)
+    workspace, directory, experiment = prepare(tmp_path, "import time;from pathlib import Path;Path('ready').write_text('ready');time.sleep(120)")
+    try:
+        job = manager.submit_experiment(experiment, str(workspace))
+        until(lambda: (directory/'ready').exists())
+        assert recovered.recover_running_jobs(str(workspace), {job: experiment.name}) == 1
+        assert recovered._jobs[job].time_limit == 1
+        recovered._jobs[job].start_time = time.time()-2
+        assert recovered.poll_jobs([job])[job] == 'TIMEOUT'
+    finally:
+        recovered.cleanup_all()
+        manager.cleanup_all()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows Job Object crash containment')
+def test_producer_crash_releases_workspace_and_leaves_unverifiable_job_unresolved(tmp_path):
+    import subprocess
+    from alpha_lab.workspace_lock import WorkspaceLock
+    workspace, directory, experiment = prepare(tmp_path, "import time;from pathlib import Path;Path('ready').write_text('ready');time.sleep(120)")
+    code = '''import json,os,sys,time
+from pathlib import Path
+from alpha_lab.local_cpu import LocalCPUManager
+from alpha_lab.experiment_db import ExperimentDB
+from alpha_lab.workspace_lock import WorkspaceLock
+workspace=Path(sys.argv[1]);owner=WorkspaceLock(workspace).acquire()
+manager=LocalCPUManager(max_parallel=1,time_limit_seconds=60)
+db=ExperimentDB(str(workspace/'experiments.db'));exp=db.get(int(sys.argv[2]))
+job=manager.submit_experiment(exp,str(workspace))
+deadline=time.monotonic()+5
+while not (workspace/'experiments'/exp.name/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+print(json.dumps({'job':job,'pid':manager._jobs[job].proc.pid}),flush=True)
+sys.stdin.readline();os._exit(23)
+'''
+    child = subprocess.Popen([sys.executable, '-u', '-c', code, str(workspace), str(experiment.id)],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        identity = json.loads(child.stdout.readline())
+        child.communicate('crash\n', timeout=10)
+        assert child.returncode == 23
+        until(lambda: not psutil.pid_exists(identity['pid']))
+        with WorkspaceLock(workspace):
+            fresh = LocalCPUManager()
+            assert fresh.recover_running_jobs(str(workspace), {identity['job']: experiment.name}) == 0
+            assert fresh.poll_jobs([identity['job']])[identity['job']] == 'UNKNOWN'
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)

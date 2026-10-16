@@ -965,10 +965,11 @@ def execute_tool(
                 skipped.append(f"#{exp_id} (not found)")
             elif exp.status != "to_implement":
                 skipped.append(f"#{exp_id} {exp.name} (status={exp.status}, can only cancel to_implement)")
-            else:
-                db.update_status(exp_id, "cancelled")
+            elif db.cancel_if_idle(exp_id, expected_status="to_implement"):
                 db.set_error(exp_id, f"Cancelled by strategist: {reason}")
                 cancelled.append(f"#{exp_id} {exp.name}")
+            else:
+                skipped.append(f"#{exp_id} {exp.name} (assigned or changed; not pruned)")
 
         lines = []
         if cancelled:

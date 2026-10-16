@@ -1,0 +1,397 @@
+Bounded US equity market-neutral research
+
+Install the optional numerical dependencies with the active environment:
+  python -m pip install -e ".[equity-research]"
+The local Windows environment already has NumPy, pandas, DuckDB and CUDA PyTorch.
+Run these commands from projects/alpha-lab with that environment active.
+
+Prepare a new immutable local panel from the Sharadar snapshots:
+  python -m alpha_lab.equity_pilot prepare --output data/market/research/panel-new
+
+Generate strategies through AlphaLab's AgentLoop, then backtest them locally:
+  python -m alpha_lab.equity_pilot run --panel data/market/research/panel-new --workspace data/market/research/run-new --model gpt-5.6-sol --reasoning-effort medium
+Choose gpt-5.6-sol, gpt-6-sol or gpt-6.1-sol explicitly; medium or high reasoning
+is required. This command loads .env locally. Configure the PC's proxy through
+HTTPS_PROXY when necessary. Keys never belong in config files or prompts.
+
+Freeze the selection rule and evaluate the holdout:
+  python -m alpha_lab.equity_validation --panel data/market/research/panel-new --run data/market/research/run-new --output data/market/research/validation-new
+Multiple --run arguments compare prespecified candidate sets. Do not reuse a
+holdout to tune or select another strategy after looking at its results.
+
+The strategy designer has exactly three tools: research_rules, register_strategy
+and report_to_user. It has no backtester, data-store, shell, file reader, web search,
+user-question or delegation tool. Public factor definitions are its only data.
+Local evaluations start after the final LLM call and never return results to it.
+Specific authorization for licensed-data summaries at the configured gateway
+would be needed to develop a separate feedback-driven mode; this mode does not
+provide that data path.
+
+The panel uses monthly universes of the 500 largest qualifying primary domestic
+common stocks, including currently delisted names. Formation uses raw price >=$5,
+20-session average dollar volume >=$5m with all 20 quotes present, 252 valid
+price observations in the preceding 252 sessions, and dated market cap >=$500m. It uses ART
+as-reported trailing financials, a two-calendar-day filing lag, and at most
+550 days after assumed availability (552 calendar days after filing). DAILY
+market cap is converted from USD millions to USD.
+Signals use percentile ranks. Momentum requires exact prices 21/63/252 exchange
+sessions earlier; gaps never substitute an older quote. Volatility, beta and
+liquidity use the same session calendar. A gap-spanning price change is missing
+rather than a one-session return. Nonpositive adjusted quotes are missing.
+No current index membership is used. Static domestic security categories are not
+a dated security master. Earlier panel versions used observed-row momentum;
+retain those versions and their results when correcting the preparation method.
+Preparation verifies pinned raw-source hashes and records its implementation
+hash. Loading verifies panel hashes before reading and rejects inconsistent
+array dimensions, duplicate identities/dates, impossible price returns,
+missing benchmark sessions and future accounting information. Legacy panels
+without complete hashes are explicitly marked unverified.
+
+New panels validate SPY date coverage against XNYS modeled exchange sessions,
+including exceptional closures and early closes. Missing dates at either end,
+missing interior dates, duplicates, extra non-session dates, and nonpositive or
+nonfinite benchmark prices fail preparation before security windows are built.
+calendar.csv records session numbers, UTC closes and early-close flags; its hash,
+calendar-library version and calendar preparation hash are pinned in panel.json.
+Loading v4 panels verifies that evidence and the full requested session range.
+This community-maintained exchange-rule model is not an independently attested
+historical exchange feed. Earlier panels remain immutable and can be audited.
+
+Availability assumptions are now recorded in each newly prepared panel and its
+result artifacts. EOD prices/volume and same-date DAILY market cap are assumed
+usable before the following session close; published vendor delivery schedules
+do not prove every historical record's arrival. The two-calendar-day ART filing
+lag is an assumed availability rule. Current snapshots and share-count vintages
+have not been independently replayed. DAILY market cap is used as supplied,
+without issuer aggregation or a separately dated share-count reconstruction.
+Those limitations prevent a point-in-time attestation even when date joins pass.
+
+Create a local quality audit and unresolved evidence queue without any backtest:
+  python -m alpha_lab.equity_quality --panel data/market/research/panel-new --output data/market/research/quality-new
+Optionally pass --terminal-audit data/market/research/terminal-audit-original
+to link separately frozen ex-post event evidence. The audit verifies all six raw
+snapshot hashes, full calendar coverage and independently reconstructed SPY
+returns. Accounting quality summaries stop in 2022; no performance calculation
+or candidate selection occurs. It records historical-arrival, security/issuer,
+market-cap, terminal and borrow/execution evidence still needed. Each supplied
+terminal event retains the original audit's scope, with no current-panel payout
+attestation. quality-queue.json and exchange-sessions.csv are hashed artifacts.
+Passing mechanical checks leaves investment_ready, point_in_time_attested and
+terminal_actions_reconciled false while economic evidence remains unresolved.
+
+Portfolio construction projects scores off an intercept and trailing SPY beta.
+Gross exposure is at most 1; each name is capped at 2% by reducing overall gross.
+Signals formed at month-end are executed at the following session close, with
+returns beginning in the subsequent interval. Targets are maintained daily, so
+turnover includes changes caused by portfolio drift. Orders for unavailable names
+are removed using information from the execution close. Newly missing prices are
+marked stale and trigger a neutral portfolio repair for the following interval.
+The missing exposure and nearby corporate actions remain available for audit.
+The base uses a zero marked return and assumed exit at the last observed price.
+This is provisional accounting, not a verified economic terminal outcome. An
+adverse 30% exposure charge on both long and short missing prices is a separate
+stress. Result artifacts explicitly keep investment_ready and
+terminal_actions_reconciled false.
+
+Audit terminal events from an existing frozen study without changing its P&L:
+  python -m alpha_lab.equity_actions --panel data/market/research/panel-original --validation data/market/research/validation-original --output data/market/research/terminal-audit-new
+This pins and verifies raw stocks/actions/tickers/dictionary sources. Cash and
+stock consideration are additive only for standard acquisitioncash and
+acquisitionstock packages. Elections, foreign cash, special classes and warrants
+are not added to default consideration. Delisting/merger/bankruptcy values are
+market caps, not per-share proceeds. Diagnostic stock marks use raw receiving-
+security quotes on the audited missing-price session, including a newly listed
+successor where an exact quote exists. No earlier or later quote substitutes for
+that date. SEP quote currency and the pinned USD/share dictionary define the
+price basis; SF1 functional reporting currency does not. Settlement timing,
+information availability and distribution/share bases remain unresolved. This
+is ex-post diagnostic evidence, not historically admissible strategy input.
+
+Compare a panel correction using identical snapshots and the original frozen spec:
+  python -m alpha_lab.equity_panel_audit --original-panel data/market/research/panel-original --corrected-panel data/market/research/panel-corrected --selection data/market/research/validation-original/selection-frozen.json --output data/market/research/comparison-new
+The comparison commits to the existing spec before calculations and evaluates
+only train/validation. It rejects a mismatched source vintage or accidental
+holdout output. Universe and feature changes are retained separately; the
+original selection, panel and holdout artifacts remain immutable.
+
+Base frictions are 10 bps of one-way traded notional and 3% annual short borrow
+(252-session convention). Cash interest and financing spreads are omitted; the
+reported Sharpe uses zero risk-free return. The report therefore measures the
+long/short strategy component, not an interest-bearing collateral account.
+SPY adjusted close is the S&P 500 total-return proxy used for estimated and
+realized beta, not an official index series. Backtests are simulated, with no
+brokerage or trade execution path.
+
+Train: 2014-2019. Validation: 2020-2022. Holdout: 2023-2025. Selection maximizes
+the minimum train/validation net Sharpe among candidates meeting neutrality
+checks. It is written to selection-frozen.json before any holdout computation.
+Sources, panel hashes, candidate hashes, implementation hash and a frozen
+backtester copy support replay. All trials and failures should be retained.
+
+Run controls are saved before the first request: output cap 4096 (including
+reasoning), 16 calls, 500,000 conservatively reserved tokens, 90-minute run cap,
+240-second request deadline, 120-second read timeout, one concurrent LLM call,
+no SDK or agent retries on terminal runtime errors, no automatic truncation,
+strict function schemas, low text verbosity, store=false, and intentionally
+omitted temperature/top_p. Gateway pricing and retention are unknown. Token
+reservations include UTF-8 input bytes plus an 8192-token gateway allowance;
+unknown gateway-injected prompts prevent an exact advance billing guarantee.
+Reported usage also stops further requests when it exceeds the reservation cap.
+Failed calls retain their reservation. Partial/failed/incomplete streams cannot
+complete an agent successfully. Local bootstrap seeds do not make LLM sampling
+deterministic. Future runs still require intentional parameter choices.
+For unattended runs, pass --deadline-utc with the explicitly authorized cutoff
+(an ISO timestamp with timezone). It is saved alongside the controls, blocks
+requests after that time, and shortens SDK/stream deadlines as it approaches.
+The same optional deadline_utc field is available in llm_runtime JSON configs.
+Client cancellation cannot establish when an upstream gateway stops billing.
+
+Shared controls for the general pipeline can be enabled in a run.py JSON config:
+  "model": "gpt-6-sol",
+  "reasoning_effort": "high",
+  "llm_runtime": {
+    "max_output_tokens": 4096,
+    "max_calls": 16,
+    "max_reserved_tokens": 500000,
+    "max_run_seconds": 5400,
+    "max_request_seconds": 240,
+    "read_timeout_seconds": 120,
+    "max_context_bytes": 64000,
+    "verbosity": "low"
+  }
+This is an example selection, not a permanent default. The shared provider
+enforces it across phase agents and summaries; legacy direct-client web proxies
+are disabled in bounded mode. The general pipeline's file/shell tools remain
+broader than this restricted equity designer, so its data flow needs separate
+review before a private-data campaign. Dashboard public-question chat has its
+own explicitly configured session budget; it does not inherit a run.py ledger.
+
+Device verification (optional; requires CUDA PyTorch):
+  python examples/verify_equity_devices.py --panel data/market/research/panel-new --selection data/market/research/validation-new/selection-frozen.json --workspace data/market/research/devices-new
+This uses AlphaLab's native Windows CPU/GPU subprocess managers to project real
+monthly factors and compare NumPy with CPU/CUDA float64 results. Small cross-
+sections typically run faster on CPU; neural experiments can use the GPU.
+Initialization is measured separately from three synchronized warm trials.
+Timing includes transfers and parity checks; it is not a kernel-only benchmark.
+Zero and fully neutralized scores are checked for zero positions on both devices.
+
+Export the generated strategies as ordinary AlphaLab experiments:
+  python -m alpha_lab.equity_experiment --panel data/market/research/panel-new --run data/market/research/run-new --workspace data/market/research/experiments-new
+Each experiment contains strategy.py, strategy.json, run_experiment.py,
+config.yaml and experiment.json. Its board entry is marked checked, ready for
+the native CPU executor. Running run_experiment.py writes results/metrics.json
+with a primary Sharpe from validation only, plus the dated daily return series.
+The worker entry point rejects holdout access. The export uses fixed, validated
+templates; model-generated titles and JSON specifications are never executed
+as code or used as directory paths. The dashboard can inspect this workspace's
+experiment database and leaderboard.
+
+Run the local viewer without starting a research campaign:
+  alpha-lab-serve --workspace data/market/research/experiments-new --host 127.0.0.1
+The viewer releases its log/file-watcher threads and background tasks on shutdown
+or partial startup failure. Restarting reloads a bounded history once, using the
+same byte cursors for replay and live logs. Complete UTF-8 JSON lines are consumed;
+partial writes wait for a newline, and replacement/truncation resets the cursor.
+Malformed and non-object records are skipped. Status reports share the history cap.
+Closing the viewer leaves independently running pipeline jobs under their owner.
+Board cancellation only prunes unassigned idle work; queued/running or assigned
+work must be cancelled through the research runner. Idle pruning uses an atomic
+conditional update so a concurrent active claim is not overwritten. Saved result
+evidence is retained when an idle row is pruned. Early compact board summaries may
+omit period labels; their detailed local results retain the explicit evaluation
+period. Avoid inferring a period from an unlabeled leaderboard number alone.
+
+Experiment workers claim a current, unassigned database row before starting a
+thread. Fixer attempts count only successful claims, with a limit of two claims;
+an attempt includes initialization failure after the claim. Checked experiments
+are reserved as queued before executor submission. Assigned checked work waits
+until its implementation worker releases the claim. Strategist pruning also
+requires unassigned to_implement work in an atomic database update.
+Only one research runner may own a workspace. Headless and interactive CLI
+runners acquire .alpha_lab_runner.lock before provider initialization; standalone
+Dispatcher.run and recover also enforce it before recovery. Interactive alpha-lab
+now requires --workspace. The OS releases the lock when its process dies; the file
+is retained and must not be removed to bypass an active owner. Live threads after
+a shutdown timeout retain ownership until they finish. The viewer may inspect the
+same workspace without becoming its research runner. This is exclusion on one
+local machine, not an attested distributed or network-filesystem lease.
+
+A queued reservation with no recorded job ID is an unresolved submission. An
+executor exception may occur after a process starts, so it remains queued with a
+diagnostic and is never automatically retried or sent to the fixer. UNKNOWN or
+unavailable executor states retain queued/running status for reconciliation.
+Check dispatcher.jsonl, local_job.json and the native process or scheduler state
+before explicitly resolving a row. If a job ID was returned but cannot be
+attached, the dispatcher logs it and requests cancellation; that request alone
+does not attest the job stopped. A later known job state clears only the matching
+UNKNOWN diagnostic. Native CPU IDs retain cpu- routing after restart. Both native
+CPU and GPU managers save invocation metadata atomically. Reattachment verifies
+job/resource/workspace/experiment, PID vintage, command, directory and Windows
+Job Object membership. Recovery preserves the original positive timeout, while
+a smaller current limit can tighten it. Terminal receipts use the full invocation
+ID; known success/failure/cancel/timeout states replay without rerunning work.
+Incomplete, legacy, missing or mismatched evidence remains UNKNOWN. A recovered
+process that exits without matching evidence is not promoted to success/failure
+from the legacy unscoped exit-code file. Local metadata is trusted workflow
+evidence, not cryptographic attestation or proof a strategy is economically valid.
+The former Linux fallback scanning process names is removed; incomplete old job
+records require manual reconciliation. Windows crash containment can terminate
+children before they write receipts, leaving unresolved evidence.
+Stopping workers blocks new tasks and prevents a preparing agent from starting.
+Shutdown keeps the claim of any worker thread still alive after the join timeout.
+Reporters use the configured reasoning effort, including high when chosen.
+Default pytest discovery is restricted to tests; archived source and synthetic
+research workspaces under data are preserved without being rediscovered as tests.
+
+External research-question chat is disabled unless --chat-config is provided.
+Copy examples/dashboard-chat.example.json to a local config and intentionally
+fill every null field: HTTPS endpoint, one approved model, medium/high reasoning, output/call/
+reserved-token/run/request/read/context limits, verbosity, an aware UTC cutoff,
+question byte cap and a new run_directory. No permanent model or parameter
+defaults are selected by the example. Relative run directories resolve against
+the config file's parent. Existing run directories cannot reset a session budget.
+  alpha-lab-serve --workspace data/market/research/experiments-new --host 127.0.0.1 --chat-config PATH_TO_LOCAL_CONFIG
+The configured HTTPS base_url must match OPENAI_BASE_URL; keep OPENAI_API_KEY
+in the local .env or environment, never in the chat config or a question. The
+viewer loads .env locally when explicit chat controls are supplied. Configure
+HTTPS_PROXY for the PC's proxy if needed. Invalid/expired controls keep the
+viewer usable while disabling external chat.
+
+Only data_scope=public_only is supported. Each confirmed request sends the
+submitted question and fixed public instructions, without automatic workspace
+files, logs, records, results, tools or prior chat history. Questions must be
+public; this is an input-scope declaration, not automatic classification of
+arbitrary pasted text. Workspace feedback remains unavailable. Local status,
+board and result panels remain available without LLM calls.
+All questions share one runtime starting at configuration. SDK retries are zero;
+concurrent questions are rejected rather than queued. Responses use the chosen
+model/effort, store=false, explicit output/context caps and bounded deadlines.
+Failed/incomplete responses do not display success; raw gateway errors and known
+API credentials are not returned. Controls, usage and status are recorded locally,
+while question and answer text are not saved. intent.json remains immutable;
+usage.json and run.json track the session. Gateway pricing/retention are unknown;
+reservation caps cannot guarantee exact billing for gateway-injected prompts.
+Closing the viewer closes its chat client and prevents new requests; client
+cancellation cannot prove when an upstream gateway stops billing.
+
+Plot export (optional; requires matplotlib):
+  python examples/plot_equity_validation.py --validation data/market/research/validation-new
+
+Runner failure handling:
+The headless runner advances only after an invoked Phase 1 agent finishes and
+nonempty learnings/report evidence exists, and after Phase 2 explicitly returns
+success. A failed builder, critic or tester cannot reuse an existing PASS review
+or passing test output to advance. Phase 2 returns False when stopped or its
+iteration limit is exhausted. Deliberately omitted phases retain their configured
+ablation behavior; Phase 3-only configs do not imply a new scientific review.
+Dispatcher recovery must succeed before its work loop. Recovery/loop exceptions
+propagate to the caller, with failed events and executor/ownership cleanup.
+Dispatcher.run returns True only on its normal completion condition, and False
+on requested stop; interrupts propagate after cleanup. The headless event log
+records one terminal run phase after provider cleanup and before log closure:
+completed, failed or stopped. Failed/stopped CLI runs exit unsuccessfully.
+These guards check local workflow completion, not the validity of a strategy or
+the provenance of old resume files. Background proposer/worker errors retain
+their existing bounded retry/diagnostic behavior; they are not all fatal errors.
+
+When llm_runtime is enabled, shared deadline/call/token limits also constrain
+dispatcher orchestration. Lifecycle checks use a short state lock separate from
+the request serialization lock, so a stalled network call cannot hold up a time
+cutoff check. No new agents, milestone reports or native experiment submissions
+are admitted after a global limit is observed. At a call/token limit, the runner
+drains already admitted responses and their tools, polling existing jobs without
+starting more work. If that last response completes the board, the run can finish
+normally; otherwise the partial run fails and executors are cleaned up. A time
+cutoff interrupts this drain. A rejected token reservation ends that runtime;
+it cannot silently reset or choose a smaller request to keep the same run alive.
+Each response tool is checked before execution and again before accepting its
+completion. A tool result arriving after the time cutoff remains logged but
+cannot promote the agent to success. Limits check admission; arbitrary shell
+tools already executing may outlive their admission check until their own
+timeout/cancellation completes. Upstream gateway billing termination is not
+attested.
+
+File-backed bounded runtimes require a fresh usage path. Initialization exclusively
+creates and flushes usage.json.intent.json (or the equivalent ledger name), then
+writes zero-call usage before SDK setup. Both files identify the run and its
+intentionally selected controls. Existing usage or intent files block restart;
+they are preserved without parsing, migrating or resetting prior budgets. Lost
+usage, corrupt/legacy evidence and partial setup still require a new reviewed run
+directory; deleting usage alone cannot reopen its intent. The provider factory
+checks credentials, fresh ledger eligibility and runtime limits before SDK setup.
+Helper providers can share the same live runtime and its counters. In-memory
+runtimes have no durable restart guarantee; a new bounded provider requires a
+ledger or an explicitly shared runtime.
+Controlled campaign resume is unavailable. A later resume implementation must
+reconcile interrupted requests, elapsed time, original controls and record
+provenance before admitting more calls. This guard validates exclusive creation
+on the local Windows filesystem, not tamper-resistant storage or a distributed
+lease. Preserve old evidence and choose a new immutable manifest intentionally
+when starting a distinct campaign. Generic runs without llm_runtime retain their
+existing behavior.
+
+Material research limitations: corrected vendor history is not a historical
+feed replay; the static security classification and ticker/issuer mappings are
+not fully point-in-time audited; terminal actions are not reconciled into all
+returns; historical short availability and locate costs are absent. Estimated
+formation beta neutrality does not guarantee realized neutrality. The saved
+panel explicitly keeps point_in_time_attested and terminal_actions_reconciled
+false. A favorable backtest would not resolve those limitations.
+
+Primary methodology references:
+  https://sharadar.com/docs/fundamentals
+  https://sharadar.com/docs/daily
+  https://sharadar.com/docs/stocks
+  https://sharadar.com/docs/actions
+  https://github.com/gerrymanoim/exchange_calendars
+  https://developers.openai.com/api/docs/guides/reasoning
+  https://developers.openai.com/api/docs/guides/function-calling
+
+Reference evidence and forward archive knowledge
+
+Create a new local identity/share-basis/terminal-work audit:
+  python -m alpha_lab.equity_reference --panel PANEL --quality-audit QUALITY --terminal-audit TERMINAL --output NEW_DIRECTORY
+The command verifies pinned panel, prior quality, terminal and raw reference
+hashes. Permanent vendor IDs identify share classes, not issuers. Ticker,
+exchange and SIC from/to pairs are checked for missing values, chain conflicts
+and disagreement with the current metadata anchor. Acquirers and related
+tickers are not merged into one identity. Paired actions are retrospective
+business-date evidence; their completeness and historical arrival are not
+attested. Static category/country/primary flags remain a dated-eligibility gap.
+
+ART cap diagnostics use the pinned field dictionary: SF1 marketcap is USD;
+DAILY marketcap is USD millions. SharesBas times split-adjusted Price times
+ShareFactor reconstructs SF1 cap. Invalid/missing bases and differences above
+the explicit 1% relative diagnostic threshold are exported for review. Formula
+agreement does not prove the historical DAILY share-count vintage, issuer
+aggregation or borrow/execution feasibility. No panel or P&L is changed.
+The audit independently computes each security's first/last pinned raw quote
+dates and joins flagged filing/report-period keys to train/validation features.
+Missing filing-date prices outside quote history are marked explained only if
+the record is unused there. Within-history gaps, unknown bounds and used records
+stay in review. share-basis-scope.csv preserves every original flag alongside
+its quote-range classification and exact count of matching formation rows.
+Each terminal observation has separate checks for entitlement, share basis,
+cash receivable/payment, stock delivery, elections, fractional shares and
+source observation time. Bankruptcy does not imply zero proceeds. Diagnostic
+terms alone never close an economic-return issue.
+
+Export only a locally captured snapshot available by a knowledge-time cutoff:
+  python -m alpha_lab.market_data.sharadar_cli --config data/market/sharadar.json export --table stocks --output NEW.csv --observed-before 2026-10-13T12:00:00Z
+Use an explicit timezone. The selector scans completed archive manifests,
+verifies the chosen Parquet hash, rejects corrupt or tied evidence and returns
+no data before the first local capture. It never substitutes the latest file.
+The export records capture time, cutoff and source hash. Record dates, filing
+dates and vendor LastUpdated do not backdate our archive knowledge. This enables
+forward replay from capture; it cannot recreate uncaptured historical feeds.
+The latest-snapshot research path retains its behavior and remains explicitly
+unattested. This cutoff is available on the Sharadar offline-export command;
+the general routed market-data export does not yet accept it.
+
+Borrow data: neither the published Sharadar nor Tiingo API catalog documents
+stock-loan availability or lending fees. Local Sharadar indicators were also
+checked. Keep the evidence gap open; require a separate dated lender/broker
+source before treating historical short positions as executable. Prices,
+volume, short interest or fund management fees are not borrow quotes.
+References: https://sharadar.com/docs/tickers ; https://sharadar.com/docs/faqs
+            https://www.tiingo.com/documentation/

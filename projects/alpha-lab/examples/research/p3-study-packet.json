@@ -1,0 +1,293 @@
+{
+  "schema_version": 3,
+  "study_id": "raw-ledger-reference-v1",
+  "hypothesis": "Synthetic integration reference: fixed neutral scores, explicit raw-share accounting and round-trip cost reconciliation. No economic alpha hypothesis is accepted by this fixture.",
+  "scenario": {
+    "schema_version": 3,
+    "scenario_id": "raw-ledger-reference-v1",
+    "source_id": "36b7e11d43bbbe81cecaf1b2c171f670ad1d7689379edc9c92cf075252a29bb3",
+    "history_mode": "synthetic_reference",
+    "point_in_time_attested": false,
+    "terminal_audit_complete": true,
+    "economic_outcomes_resolved": true,
+    "securities": {
+      "A": "A",
+      "B": "B",
+      "C": "C",
+      "D": "D"
+    },
+    "initial_cash_usd": 1000000.0,
+    "initial_shares": {},
+    "policy": {
+      "methodology": "raw_share_cash_action_ledger_v1",
+      "price_basis": "unadjusted_usd_per_share_explicit_actions",
+      "trade_settlement": "T0_research_cash_not_broker_settlement",
+      "short_proceeds": "segregated_no_cash_interest_no_rebate",
+      "dividend_entitlement": "prior_close_position_before_ex_session_orders",
+      "missing_marks": "last_raw_mark_provisional_no_executable_exit",
+      "day_count": "ACT365F",
+      "annual_cash_credit": 0.0,
+      "annual_cash_debit": 0.05,
+      "commission_bps": 1.0,
+      "slippage_bps": 2.0,
+      "participation": 0.1,
+      "allow_cash_debit": true,
+      "borrow_mode": "explicit_hypothetical",
+      "hypothetical_borrow_rate": 0.02,
+      "max_gross": 1.1,
+      "max_name": 0.35,
+      "tolerance_usd": 1e-06
+    },
+    "sessions": [
+      {
+        "date": "2020-01-02",
+        "close_utc": "2020-01-02 21:00:00+00:00",
+        "quotes": {
+          "A": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "B": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "C": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "D": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          }
+        }
+      },
+      {
+        "date": "2020-01-03",
+        "close_utc": "2020-01-03 21:00:00+00:00",
+        "quotes": {
+          "A": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "B": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "C": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "D": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          }
+        }
+      },
+      {
+        "date": "2020-01-06",
+        "close_utc": "2020-01-06 21:00:00+00:00",
+        "quotes": {
+          "A": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "B": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "C": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "D": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          }
+        }
+      },
+      {
+        "date": "2020-01-07",
+        "close_utc": "2020-01-07 21:00:00+00:00",
+        "quotes": {
+          "A": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "B": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "C": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "D": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          }
+        }
+      },
+      {
+        "date": "2020-01-08",
+        "close_utc": "2020-01-08 21:00:00+00:00",
+        "quotes": {
+          "A": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "B": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "C": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          },
+          "D": {
+            "raw_close_usd": 100.0,
+            "volume_shares": 1000000.0,
+            "tradable": true
+          }
+        }
+      }
+    ],
+    "actions": [],
+    "lending": [],
+    "decisions": []
+  },
+  "portfolio_policy": {
+    "methodology": "score_projection_covariance_penalty_v1",
+    "score_units": "unitless_rank_not_expected_return",
+    "borrow_recall": "block_increases_report_retained_short",
+    "risk_target": "additive_excess_returns",
+    "risk_units": "squared_decimal_return",
+    "risk_horizon_sessions": 1,
+    "max_gross": 1.0,
+    "max_name": 0.3,
+    "max_issuer_gross": 0.6,
+    "max_sector_net": 0.01,
+    "max_turnover": 2.5,
+    "net_tolerance": 0.005,
+    "beta_tolerance": 0.005,
+    "covariance_penalty": 0.01,
+    "numerical_tolerance": 1e-06,
+    "max_iterations": 200,
+    "max_securities": 128
+  },
+  "risk_mode": "diagonal_reference",
+  "variance_per_session": 0.0001,
+  "risk_contract_sha256": null,
+  "risk_source_policy_id": null,
+  "benchmark_id": "SPY",
+  "cash_id": "zero",
+  "calendar_id": "XNYS_modeled_sessions",
+  "identity_namespace": "synthetic_share_class",
+  "max_risk_age_calendar_days": 3,
+  "contexts": [
+    {
+      "context_id": "open-neutral-reference",
+      "date": "2020-01-02",
+      "information_time": "2020-01-02 21:00:00+00:00",
+      "signal_evidence_sha256": "3e2318f5e9721b22e04d4d43089c5d5cee616685cb2ccd92c36b576e3da39f80",
+      "source_policy_id": "synthetic-fixed-scores-v1",
+      "risk_binding_id": null,
+      "fill_lag_sessions": 1,
+      "points": [
+        {
+          "security_id": "A",
+          "score": 1.0,
+          "eligible": true,
+          "issuer_id": "A",
+          "sector_id": "same",
+          "beta": 0.7
+        },
+        {
+          "security_id": "B",
+          "score": 1.0,
+          "eligible": true,
+          "issuer_id": "B",
+          "sector_id": "same",
+          "beta": 1.3
+        },
+        {
+          "security_id": "C",
+          "score": -1.0,
+          "eligible": true,
+          "issuer_id": "C",
+          "sector_id": "same",
+          "beta": 0.7
+        },
+        {
+          "security_id": "D",
+          "score": -1.0,
+          "eligible": true,
+          "issuer_id": "D",
+          "sector_id": "same",
+          "beta": 1.3
+        }
+      ]
+    },
+    {
+      "context_id": "close-neutral-reference",
+      "date": "2020-01-07",
+      "information_time": "2020-01-07 21:00:00+00:00",
+      "signal_evidence_sha256": "d24d3a50655087c2d3d32682daf351e716ef6ce56ca37545892018bd28160aea",
+      "source_policy_id": "synthetic-fixed-scores-v1",
+      "risk_binding_id": null,
+      "fill_lag_sessions": 1,
+      "points": [
+        {
+          "security_id": "A",
+          "score": 0.0,
+          "eligible": true,
+          "issuer_id": "A",
+          "sector_id": "same",
+          "beta": 0.7
+        },
+        {
+          "security_id": "B",
+          "score": 0.0,
+          "eligible": true,
+          "issuer_id": "B",
+          "sector_id": "same",
+          "beta": 1.3
+        },
+        {
+          "security_id": "C",
+          "score": 0.0,
+          "eligible": true,
+          "issuer_id": "C",
+          "sector_id": "same",
+          "beta": 0.7
+        },
+        {
+          "security_id": "D",
+          "score": 0.0,
+          "eligible": true,
+          "issuer_id": "D",
+          "sector_id": "same",
+          "beta": 1.3
+        }
+      ]
+    }
+  ]
+}

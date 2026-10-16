@@ -1,0 +1,10 @@
+{
+  "hypothesis_id": "baseline-momentum-v1",
+  "family_id": "us-equity-signals-v1",
+  "premise": "Prior 12-to-1 month price momentum may rank next-month equity returns. This is a baseline diagnostic, not an investable portfolio claim.",
+  "tests": [
+    "Report per-fold rank IC and full source/score/outcome coverage.",
+    "Assign quintiles before filtering missing future outcomes.",
+    "Inspect score stability and membership churn without choosing a winning strategy."
+  ]
+}

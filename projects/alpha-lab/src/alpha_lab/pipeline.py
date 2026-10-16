@@ -44,38 +44,18 @@ def _extract_verdict(content: str) -> str:
 
     Returns "PASS", "NEEDS FIXES", or "UNCLEAR".
     """
-    # Normalize whitespace
-    content = content.strip()
-
-    # Patterns to look for verdict (case-insensitive)
-    verdict_patterns = [
-        # "Final verdict: PASS" or "Final verdict: NEEDS FIXES"
-        r'final\s+verdict[:\s*]+\**(PASS|NEEDS\s*FIXES)\**',
-        # "Verdict: PASS" or "Verdict: NEEDS FIXES"
-        r'(?<!\w)verdict[:\s*]+\**(PASS|NEEDS\s*FIXES)\**',
-        # Markdown header "## Verdict" followed by verdict on same/next line
-        r'##\s*(?:final\s+)?verdict[:\s]*(PASS|NEEDS\s*FIXES)',
-        # Bold verdict "**PASS**" or "**NEEDS FIXES**" at end of document (last 500 chars)
-        r'\*\*(PASS|NEEDS\s*FIXES)\*\*',
-    ]
-
-    for pattern in verdict_patterns:
-        match = re.search(pattern, content, re.IGNORECASE)
-        if match:
-            verdict = match.group(1).upper()
-            if "NEEDS" in verdict:
-                return "NEEDS FIXES"
-            return "PASS"
-
-    # Fallback: look in the last 500 characters for unstructured verdict
-    # (more likely to be the actual conclusion, not instruction examples)
-    tail = content[-500:].upper()
-    if "NEEDS FIXES" in tail and "PASS" not in tail.split("NEEDS FIXES")[-1]:
-        return "NEEDS FIXES"
-    if "VERDICT" in tail and "PASS" in tail:
-        return "PASS"
-
-    return "UNCLEAR"
+    # Ignore fenced examples and prose mentions. Honor the last actual verdict,
+    # including standalone Markdown headings and bold/ordinary verdict lines.
+    content = re.sub(r'```[^\n]*\n.*?```', '', content, flags=re.DOTALL)
+    pattern = (
+        r'^\s*(?:#{1,6}\s*)?(?:\*\*)?'
+        r'(?:(?:final\s+)?verdict(?:\*\*)?\s*[:\s]+(?:\*\*)?)?'
+        r'(PASS|NEEDS\s+FIXES)(?:\*\*)?\s*[.!]?\s*$'
+    )
+    matches = list(re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE))
+    if not matches:
+        return "UNCLEAR"
+    return "NEEDS FIXES" if "NEEDS" in matches[-1].group(1).upper() else "PASS"
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +73,7 @@ def detect_phase1_complete(workspace: str) -> bool:
     if not report_dir.is_dir():
         return False
     md_files = list(report_dir.glob("*.md"))
-    return len(md_files) > 0
+    return any(report.is_file() and report.read_text().strip() for report in md_files)
 
 
 def detect_phase2_progress(workspace: str, adapter: Any | None = None) -> str:
@@ -244,12 +224,15 @@ class Pipeline:
         """Emit an event via the callback."""
         self.event_callback(event)
 
-    def run_phase2(self) -> None:
+    def run_phase2(self) -> bool:
         """Run the full Phase 2 builder→critic→tester loop.
 
         Auto-detects progress and resumes from the right step.
+        Returns True only after successful agent steps and passing tests.
         """
         max_iters = self.config.pipeline.max_fix_iterations
+        if self._stop_requested:
+            return False
 
         # Detect where to start
         start_step = detect_phase2_progress(self.workspace, adapter=self.adapter)
@@ -262,7 +245,7 @@ class Pipeline:
                 status="completed",
                 detail="Phase 2 already complete (tests pass)",
             ))
-            return
+            return True
 
         logger.info(f"Phase 2 resuming from: {start_step}")
         self.emit(PhaseEvent(
@@ -284,7 +267,7 @@ class Pipeline:
         if not skip_critic:
             for iteration in range(max_iters):
                 if self._stop_requested:
-                    return
+                    return False
 
                 # Builder (skip on first iteration if resuming from critic)
                 if not (iteration == 0 and skip_builder):
@@ -314,7 +297,7 @@ class Pipeline:
                     )
 
                     if self._stop_requested:
-                        return
+                        return False
 
                     self.emit(PhaseEvent(
                         phase="phase2",
@@ -335,7 +318,7 @@ class Pipeline:
                             status="failed",
                             detail="Phase 2 aborted: builder failed",
                         ))
-                        return
+                        return False
 
                 # Critic
                 self.emit(PhaseEvent(
@@ -354,15 +337,21 @@ class Pipeline:
                 )
 
                 if self._stop_requested:
-                    return
+                    return False
 
                 self.emit(PhaseEvent(
                     phase="phase2",
                     step="critic",
                     iteration=iteration,
-                    status="completed",
+                    status="completed" if critic_result.completed else "failed",
                     detail=critic_result.summary[:200],
                 ))
+                if not critic_result.completed:
+                    self.emit(PhaseEvent(
+                        phase="phase2", step="complete", status="failed",
+                        detail="Phase 2 aborted: critic failed",
+                    ))
+                    return False
 
                 # Check review.md for verdict
                 if self._review_passes():
@@ -380,15 +369,15 @@ class Pipeline:
                     status="failed",
                     detail="Phase 2 aborted: max critic iterations reached without passing",
                 ))
-                return
+                return False
 
         if self._stop_requested:
-            return
+            return False
 
         # --- Tester (with retry loop) ---
         for iteration in range(max_iters):
             if self._stop_requested:
-                return
+                return False
 
             tester_msg = "Write tests for backtest/ and run them. Go."
             if iteration > 0:
@@ -419,7 +408,7 @@ class Pipeline:
                 )
 
                 if self._stop_requested:
-                    return
+                    return False
 
                 self.emit(PhaseEvent(
                     phase="phase2",
@@ -440,7 +429,7 @@ class Pipeline:
                         status="failed",
                         detail="Phase 2 aborted: builder fix failed",
                     ))
-                    return
+                    return False
 
             self.emit(PhaseEvent(
                 phase="phase2",
@@ -458,15 +447,21 @@ class Pipeline:
             )
 
             if self._stop_requested:
-                return
+                return False
 
             self.emit(PhaseEvent(
                 phase="phase2",
                 step="tester",
                 iteration=iteration,
-                status="completed",
+                status="completed" if tester_result.completed else "failed",
                 detail=tester_result.summary[:200],
             ))
+            if not tester_result.completed:
+                self.emit(PhaseEvent(
+                    phase="phase2", step="complete", status="failed",
+                    detail="Phase 2 aborted: tester failed",
+                ))
+                return False
 
             # Check if tests pass
             test_output = self._run_tests()
@@ -479,7 +474,7 @@ class Pipeline:
                     status="completed",
                     detail="Phase 2 complete — all tests pass",
                 ))
-                return
+                return True
             else:
                 logger.info(f"Tests failed — iteration {iteration + 1}")
         else:
@@ -491,7 +486,7 @@ class Pipeline:
                 status="failed",
                 detail="Phase 2 aborted: max test iterations reached without passing",
             ))
-            return
+            return False
 
         # If we get here, tests never fully passed
         final_output = self._run_tests()
@@ -503,6 +498,7 @@ class Pipeline:
                 status="completed",
                 detail="Phase 2 complete — tests pass after final check",
             ))
+            return True
         else:
             self.emit(PhaseEvent(
                 phase="phase2",
@@ -511,6 +507,7 @@ class Pipeline:
                 status="failed",
                 detail="Phase 2 finished — some tests may still fail",
             ))
+            return False
 
     def _run_step(
         self,

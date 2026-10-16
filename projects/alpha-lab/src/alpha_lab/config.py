@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from alpha_lab.llm_runtime import LLMSettings
 
 # Try yaml, fall back to json-only
 try:
@@ -82,6 +83,7 @@ class TaskConfig:
     provider: str = "openai"  # "openai" or "anthropic"
     domain: str = ""  # "time_series", "cuda_kernel", "nanogpt", or free-text for Phase 0
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    llm_runtime: LLMSettings | None = None
 
     def resolve_data_path(self, base_dir: str | Path) -> str:
         """Resolve data_path relative to base_dir if not absolute."""
@@ -131,6 +133,16 @@ def load_config(path: str | Path) -> TaskConfig:
             cleaned[k] = v
 
     # Handle nested pipeline config
+    if "llm_runtime" in cleaned:
+        runtime_raw = cleaned["llm_runtime"]
+        if not isinstance(runtime_raw, dict):
+            raise ValueError("llm_runtime must be a mapping")
+        if "model" not in cleaned or "reasoning_effort" not in cleaned:
+            raise ValueError("Bounded runs require explicit model and reasoning_effort")
+        if cleaned.get("provider", "openai") != "openai":
+            raise ValueError("llm_runtime currently supports the OpenAI Responses provider")
+        cleaned["llm_runtime"] = LLMSettings(model=cleaned["model"],
+                                           reasoning_effort=cleaned["reasoning_effort"], **runtime_raw)
     if "pipeline" in cleaned and isinstance(cleaned["pipeline"], dict):
         pipeline_raw = dict(cleaned["pipeline"])
         # Handle nested phase3 config inside pipeline

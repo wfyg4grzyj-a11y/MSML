@@ -1,0 +1,6 @@
+{
+  "family_id": "us-equity-signals-v1",
+  "premise": "Compare prespecified value, quality and momentum diagnostics, then test a fixed quality multiplier on momentum. Development evidence only; no performance-based tuning or automatic strategy selection.",
+  "max_unique_trials": 4,
+  "max_attempts_per_trial": 2
+}

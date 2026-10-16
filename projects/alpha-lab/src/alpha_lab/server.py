@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import asynccontextmanager
+import heapq
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -19,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from alpha_lab.events import AgentEvent, FileChangedEvent
@@ -77,42 +80,85 @@ class LogTailer:
         self._thread: threading.Thread | None = None
         # Track file positions: {path: offset}
         self._offsets: dict[str, int] = {}
+        self._identities: dict[str, tuple[int, int]] = {}
+        self._checkpoints: dict[str, bytes] = {}
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            if self._stop_event.is_set():
+                raise RuntimeError("Previous log tailer is still stopping")
+            return
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._tail, daemon=True)
+        self._thread = threading.Thread(target=self._tail, daemon=True, name="alpha-lab-log-tailer")
         self._thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
+        if (self._thread is not None and self._thread.ident is not None
+                and self._thread is not threading.current_thread()):
+            self._thread.join(timeout=2)
+            if self._thread.is_alive():
+                logger.warning("Log tailer did not stop within two seconds")
 
     def _tail(self) -> None:
         """Poll for new lines in all .jsonl files every 0.5s."""
         while not self._stop_event.is_set():
-            if self.logs_dir.exists():
+            try:
                 for log_path in self.logs_dir.glob("*.jsonl"):
+                    if self._stop_event.is_set():
+                        break
                     self._read_new_lines(str(log_path))
+            except OSError:
+                logger.debug("Cannot scan dashboard log directory")
             self._stop_event.wait(0.5)
 
-    def _read_new_lines(self, path: str) -> None:
+    def _read_new_lines(self, path: str, emit=None) -> None:
+        """Consume complete UTF-8 lines; preserve a partial line for the next poll.
+
+        Byte cursors agree with filesystem sizes on Windows. File identity and
+        a small checkpoint detect replacement/truncation between polls. Startup
+        history uses this same reader/cursor, avoiding a load-to-tail gap.
+        """
         offset = self._offsets.get(path, 0)
         try:
-            with open(path) as f:
+            with open(path, 'rb') as f:
+                stat = os.fstat(f.fileno())
+                identity = (stat.st_dev, stat.st_ino)
+                if (offset>stat.st_size or (path in self._identities
+                                          and self._identities[path]!=identity)):
+                    offset=0
+                checkpoint=self._checkpoints.get(path)
+                if offset and checkpoint is not None:
+                    f.seek(max(0,offset-len(checkpoint)))
+                    if f.read(len(checkpoint))!=checkpoint:
+                        offset=0
                 f.seek(offset)
-                for line in f:
-                    line = line.strip()
+                while True:
+                    line_start=f.tell()
+                    line=f.readline()
                     if not line:
+                        break
+                    if not line.endswith(b'\n'):
+                        f.seek(line_start)
+                        break
+                    if not line.strip():
                         continue
                     try:
-                        data = json.loads(line)
-                        # Create a minimal AgentEvent-like object for the broadcast loop
-                        evt = _DictEvent(data)
-                        self._loop.call_soon_threadsafe(self._queue.put_nowait, evt)
-                    except json.JSONDecodeError:
-                        pass
+                        data = json.loads(line.decode('utf-8'))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if not isinstance(data,dict):
+                        continue
+                    if emit is not None:
+                        emit(data)
+                    elif not self._stop_event.is_set() and not self._loop.is_closed():
+                        self._loop.call_soon_threadsafe(self._queue.put_nowait, _DictEvent(data))
                 self._offsets[path] = f.tell()
-        except Exception:
-            pass
+                self._identities[path] = identity
+                f.seek(max(0,self._offsets[path]-64))
+                self._checkpoints[path] = f.read(min(64,self._offsets[path]))
+        except (OSError, RuntimeError):
+            logger.debug("Dashboard log unavailable or event loop closed")
 
 
 class _DictEvent:
@@ -146,12 +192,21 @@ class FileWatcher:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            if self._stop_event.is_set():
+                raise RuntimeError("Previous file watcher is still stopping")
+            return
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._watch, daemon=True)
+        self._thread = threading.Thread(target=self._watch, daemon=True, name="alpha-lab-file-watcher")
         self._thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
+        if (self._thread is not None and self._thread.ident is not None
+                and self._thread is not threading.current_thread()):
+            self._thread.join(timeout=2)
+            if self._thread.is_alive():
+                logger.warning("File watcher did not stop within two seconds")
 
     def _watch(self) -> None:
         try:
@@ -161,9 +216,12 @@ class FileWatcher:
                 self.workspace,
                 stop_event=self._stop_event,
                 debounce=500,
+                rust_timeout=1000,
                 recursive=True,
             ):
                 for change_type, path_str in changes:
+                    if self._stop_event.is_set() or self._loop.is_closed():
+                        return
                     rel_path = os.path.relpath(path_str, self.workspace)
 
                     if any(
@@ -186,14 +244,31 @@ class FileWatcher:
                         self._queue.put_nowait, event
                     )
         except Exception as e:
-            logger.error(f"File watcher error: {e}")
+            if not self._stop_event.is_set():
+                logger.error(f"File watcher error: {e}")
 
 
 # ---------------------------------------------------------------------------
 # FastAPI Application
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Alpha Lab")
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    global _runtime_active
+    if _runtime_active:
+        raise RuntimeError("Dashboard already has an active lifespan")
+    _runtime_active = True
+    try:
+        await startup()
+        yield
+    finally:
+        try:
+            await shutdown()
+        finally:
+            _runtime_active = False
+
+
+app = FastAPI(title="Alpha Lab", lifespan=lifespan)
 
 _server_start_time: float = 0.0
 _metrics_collector = MetricsCollector()
@@ -206,50 +281,70 @@ event_history: list[dict] = []  # All events, replayed to new WS connections
 MAX_EVENT_HISTORY = 10_000  # Cap to prevent OOM on long runs
 _broadcast_task: asyncio.Task | None = None  # prevent GC of broadcast loop
 _status_report_task: asyncio.Task | None = None  # prevent GC of timer
+_manual_status_tasks: set[asyncio.Task] = set()
+_runtime_active = False
 
 # Set by serve_main.
 _workspace: str = ""
+_research_root: str | None = None
 _adapter_cache: dict = {}  # {"adapter": DomainAdapter | None}
+_chat_config_path: Path | None = None
+_chat_session: Any = None
+_chat_configuration_error: str | None = None
+_chat_request_tasks: set[asyncio.Task] = set()
 
 
-def _load_jsonl_history() -> None:
-    """Load events from all .jsonl log files into event_history."""
+def _load_jsonl_history(tailer: LogTailer) -> None:
+    """Keep only the most recent bounded history and reuse its byte cursors."""
     logs_dir = Path(_workspace) / "logs"
     if not logs_dir.exists():
         return
+    recent: list[tuple[float, int, dict]] = []
     total_loaded = 0
+
+    def remember(data):
+        nonlocal total_loaded
+        timestamp=data.get('timestamp',0)
+        if (not isinstance(timestamp,(int,float)) or isinstance(timestamp,bool)
+                or not math.isfinite(timestamp)):
+            timestamp=0
+        total_loaded+=1
+        entry=(timestamp,total_loaded,data)
+        if len(recent)<MAX_EVENT_HISTORY:
+            heapq.heappush(recent,entry)
+        else:
+            heapq.heappushpop(recent,entry)
+
     for log_path in sorted(logs_dir.glob("*.jsonl")):
-        loaded = 0
-        errors = 0
-        try:
-            with open(log_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event_history.append(json.loads(line))
-                        loaded += 1
-                    except json.JSONDecodeError:
-                        errors += 1
-            if loaded:
-                logger.info(f"Loaded {loaded} events from {log_path.name}" +
-                             (f" ({errors} malformed lines skipped)" if errors else ""))
-            total_loaded += loaded
-        except Exception as e:
-            logger.warning(f"Failed to load {log_path.name}: {e}")
+        tailer._read_new_lines(str(log_path),emit=remember)
+    event_history[:] = [entry[2] for entry in sorted(recent)]
     if total_loaded:
-        # Sort by timestamp so events from multiple files are in order
-        event_history.sort(key=lambda e: e.get("timestamp", 0))
+        logger.info(f"Loaded {len(event_history)} recent events from {total_loaded} complete records")
 
 
-@app.on_event("startup")
 async def startup() -> None:
     global file_watcher, log_tailer, _broadcast_task, _status_report_task, _server_start_time
+    global _chat_session, _chat_configuration_error
 
     _server_start_time = time.time()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     manager.set_loop(loop)
+    manager.workspace = _workspace
+    manager.db = None
+    event_history.clear()
+    connected_websockets.clear()
+    _adapter_cache.clear()
+    _chat_session = None
+    _chat_configuration_error = None
+    if _chat_config_path is not None:
+        try:
+            from dotenv import load_dotenv
+            from alpha_lab.dashboard_chat import PublicChatSession
+            load_dotenv()
+            _chat_session = PublicChatSession(_chat_config_path)
+        except Exception as error:
+            _chat_configuration_error = "External research chat configuration is invalid or its run directory already exists."
+            logger.warning("External chat disabled: %s",type(error).__name__)
 
     _broadcast_task = asyncio.create_task(_broadcast_loop())
     _status_report_task = asyncio.create_task(_status_report_timer())
@@ -263,27 +358,64 @@ async def startup() -> None:
             logger.warning(f"Failed to load adapter at startup: {e}")
             _adapter_cache["adapter"] = None
 
-    # Load previous run's events if available
-    if _workspace:
-        _load_jsonl_history()
-
     # Load experiment DB if it exists
     manager._try_load_db()
 
     # Start log tailer — streams live JSONL events from the pipeline
     if _workspace:
         log_tailer = LogTailer(_workspace, loop, manager._queue)
-        # Set offsets to end of existing files so we only get new events
-        logs_dir = Path(_workspace) / "logs"
-        if logs_dir.exists():
-            for lp in logs_dir.glob("*.jsonl"):
-                log_tailer._offsets[str(lp)] = lp.stat().st_size
+        _load_jsonl_history(log_tailer)
         log_tailer.start()
 
     # Always start file watcher if workspace exists
     if _workspace and Path(_workspace).exists():
         file_watcher = FileWatcher(_workspace, loop, manager._queue)
         file_watcher.start()
+
+
+async def shutdown() -> None:
+    """Release only viewer-owned resources; pipeline jobs run independently."""
+    global file_watcher, log_tailer, _broadcast_task, _status_report_task, _server_start_time
+    global _chat_session, _chat_configuration_error
+    if _chat_session is not None:
+        try:
+            await asyncio.to_thread(_chat_session.close)
+        except Exception as error:
+            logger.warning("Chat cleanup failed: %s",type(error).__name__)
+    owners=[owner for owner in (file_watcher,log_tailer) if owner is not None]
+    for owner in owners:
+        owner._stop_event.set()
+    if owners:
+        await asyncio.gather(*(asyncio.to_thread(owner.stop) for owner in owners))
+    tasks=set(_manual_status_tasks)
+    tasks.update(_chat_request_tasks)
+    tasks.update(task for task in (_broadcast_task,_status_report_task) if task is not None)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks,return_exceptions=True)
+    for ws in list(connected_websockets):
+        try:
+            await asyncio.wait_for(ws.close(code=1001),timeout=2)
+        except Exception:
+            pass
+    connected_websockets.clear()
+    _manual_status_tasks.clear()
+    _chat_request_tasks.clear()
+    _chat_session = None
+    _chat_configuration_error = None
+    file_watcher = log_tailer = None
+    _broadcast_task = _status_report_task = None
+    _server_start_time = 0.
+    manager._queue = manager._loop = manager.db = None
+    event_history.clear()
+    _adapter_cache.clear()
+
+
+def _remember_event(data: dict) -> None:
+    event_history.append(data)
+    if len(event_history)>MAX_EVENT_HISTORY:
+        del event_history[:max(1,MAX_EVENT_HISTORY//5)]
 
 
 async def _broadcast_loop() -> None:
@@ -299,11 +431,7 @@ async def _broadcast_loop() -> None:
             continue
 
         data = event.to_dict()
-        event_history.append(data)
-        if len(event_history) > MAX_EVENT_HISTORY:
-            # Trim oldest 20% to avoid trimming every iteration
-            trim_count = MAX_EVENT_HISTORY // 5
-            del event_history[:trim_count]
+        _remember_event(data)
 
         dead: set[WebSocket] = set()
         for ws in list(connected_websockets):  # snapshot to avoid set-changed-during-iteration
@@ -323,7 +451,7 @@ async def _generate_and_broadcast_status() -> None:
         gen = OutputGenerator(_workspace, adapter=_adapter_cache.get("adapter"))
         report = gen.generate_status_report()
         data = {"type": "status_report", "timestamp": time.time(), **report}
-        event_history.append(data)
+        _remember_event(data)
 
         dead: set[WebSocket] = set()
         for ws in list(connected_websockets):
@@ -409,7 +537,9 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             msg_type = msg.get("type", "")
 
             if msg_type == "generate_status":
-                asyncio.ensure_future(_generate_and_broadcast_status())
+                task=asyncio.create_task(_generate_and_broadcast_status())
+                _manual_status_tasks.add(task)
+                task.add_done_callback(_manual_status_tasks.discard)
 
     except WebSocketDisconnect:
         pass
@@ -624,7 +754,7 @@ async def get_experiment(exp_id: int) -> JSONResponse:
 
 @app.post("/api/experiments/{exp_id}/cancel")
 async def cancel_experiment(exp_id: int) -> JSONResponse:
-    """Cancel an experiment by setting its status to 'cancelled'."""
+    """Prune idle work; active processes remain owned by the research runner."""
     manager._try_load_db()
     if manager.db is None:
         return JSONResponse({"error": "No experiment database"}, status_code=404)
@@ -637,8 +767,17 @@ async def cancel_experiment(exp_id: int) -> JSONResponse:
             {"error": f"Cannot cancel experiment in '{exp.status}' state"},
             status_code=409,
         )
+    if exp.status in {"queued", "running"} or exp.worker_id is not None:
+        return JSONResponse(
+            {"error": "Work is already in progress. Cancel it from the research runner; the viewer cannot stop it."},
+            status_code=409,
+        )
     try:
-        manager.db.update_status(exp_id, "cancelled")
+        if not manager.db.cancel_if_idle(exp_id):
+            return JSONResponse(
+                {"error": "Experiment state changed. Refresh the board and cancel active work from the research runner."},
+                status_code=409,
+            )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     return JSONResponse({"status": "cancelled", "id": exp_id})
@@ -704,116 +843,57 @@ async def get_leaderboard() -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Chat endpoint for status queries
+# Explicit public research-question chat
 # ---------------------------------------------------------------------------
 
 
+@app.get("/api/chat-config")
+async def get_chat_config() -> JSONResponse:
+    if _chat_session is None:
+        return JSONResponse({"enabled":False,"workspace_context":False,
+                             "reason":_chat_configuration_error or "External research chat is not configured."})
+    return JSONResponse(_chat_session.describe())
+
+
 @app.post("/api/chat")
-async def chat_query(body: dict) -> JSONResponse:
-    """Answer questions about the system status using an LLM.
-
-    Accepts {"question": "what's happening?"} and returns {"answer": "..."}.
-    """
-    if not _workspace:
-        return JSONResponse({"error": "Workspace not configured"}, status_code=400)
-
-    question = body.get("question", "").strip()
-    if not question:
-        return JSONResponse({"error": "No question provided"}, status_code=400)
-
+async def chat_query(request: Request) -> JSONResponse:
+    """One consented public question; no automatic workspace context or history."""
+    raw=await request.body()
+    if len(raw)>131_072:
+        return JSONResponse({"error":"Question request exceeds the HTTP body limit."},status_code=413)
     try:
-        # Build context from current state
-        context_parts = []
-
-        # Board summary
-        manager._try_load_db()
-        if manager.db is not None:
-            summary = manager.db.board_summary()
-            context_parts.append("## Experiment Board Status")
-            for status, count in sorted(summary.items()):
-                context_parts.append(f"  {status}: {count}")
-
-            # Leaderboard
-            _chat_metric = "sharpe"
-            _chat_metric_display = "Sharpe"
-            if _adapter_cache.get("adapter") is not None:
-                _chat_metric = _adapter_cache["adapter"].metric.primary_metric
-                _chat_metric_display = _adapter_cache["adapter"].metric.display_name
-            leaders = manager.db.leaderboard(_chat_metric, 5)
-            if leaders:
-                context_parts.append(f"\n## Top 5 Experiments (by {_chat_metric_display})")
-                for i, exp in enumerate(leaders, 1):
-                    metrics = {}
-                    if exp.results_json:
-                        try:
-                            metrics = json.loads(exp.results_json)
-                        except (ValueError, TypeError):
-                            pass
-                    val = metrics.get(_chat_metric, "?")
-                    context_parts.append(f"  {i}. {exp.name} — {_chat_metric_display}: {val}")
-
-            # Recent errors
-            all_exps = manager.db.list_all()
-            errors = [e for e in all_exps if e.error][-5:]
-            if errors:
-                context_parts.append("\n## Recent Errors")
-                for exp in errors:
-                    context_parts.append(f"  #{exp.id} {exp.name}: {exp.error[:100]}...")
-
-        # System status
-        context_parts.append(f"\n## System Status")
-        context_parts.append(f"  Workspace: {_workspace}")
-
-        # Read recent log entries
-        log_path = Path(_workspace) / "logs" / "dispatcher.jsonl"
-        if log_path.exists():
-            try:
-                lines = log_path.read_text().strip().split("\n")[-20:]
-                context_parts.append("\n## Recent Dispatcher Log (last 20 entries)")
-                for line in lines:
-                    try:
-                        entry = json.loads(line)
-                        action = entry.get("action", "unknown")
-                        context_parts.append(f"  {action}: {json.dumps({k: v for k, v in entry.items() if k not in ['t', 'action']})[:100]}")
-                    except (ValueError, TypeError):
-                        pass
-            except Exception:
-                pass
-
-        context = "\n".join(context_parts)
-
-        # Call LLM to answer
-        from alpha_lab.client import get_provider
-        chat_provider = get_provider("openai")
-        try:
-            answer = chat_provider.complete(
-                model="gpt-4.1-mini",
-                system=(
-                    "You are a helpful assistant for Alpha Lab, an autonomous ML research system. "
-                    "Answer the user's question about the system status based on the context provided. "
-                    "Be concise and specific. If you don't have enough information, say so."
-                ),
-                messages=[
-                    {"role": "user", "content": f"## Current System State\n{context}\n\n## User Question\n{question}"},
-                ],
-            )
-        finally:
-            if hasattr(chat_provider, 'openai_client'):
-                try:
-                    chat_provider.openai_client.close()
-                except Exception:
-                    pass
-
-        return JSONResponse({"answer": answer})
-
-    except Exception as e:
-        logger.error(f"Chat query failed: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500)
+        body=json.loads(raw)
+    except (ValueError,UnicodeDecodeError):
+        return JSONResponse({"error":"Expected a public-question JSON request."},status_code=400)
+    if not isinstance(body,dict) or set(body)!={"question","consent_to_send"}:
+        return JSONResponse({"error":"Only question and consent_to_send are accepted; workspace context is disabled."},status_code=400)
+    if body["consent_to_send"] is not True:
+        return JSONResponse({"error":"Confirm sending this public question to the configured endpoint."},status_code=400)
+    session=_chat_session
+    if session is None:
+        return JSONResponse({"error":"External research chat is disabled. Configure its model and limits explicitly."},status_code=503)
+    from alpha_lab.dashboard_chat import ChatError
+    task=asyncio.create_task(asyncio.to_thread(session.answer,body["question"]))
+    _chat_request_tasks.add(task)
+    try:
+        answer=await task
+        return JSONResponse({"answer":answer,"model":session.settings.model,
+                             "reasoning_effort":session.settings.reasoning_effort,"workspace_context":False})
+    except ChatError as error:
+        return JSONResponse({"error":str(error)},status_code=error.status_code)
+    except Exception as error:
+        logger.warning("Research chat failed: %s",type(error).__name__)
+        return JSONResponse({"error":"Research chat failed; no automatic retry."},status_code=502)
+    finally:
+        _chat_request_tasks.discard(task)
 
 
 # ---------------------------------------------------------------------------
 # Static files (must be last)
 # ---------------------------------------------------------------------------
+
+from alpha_lab.research.web import research_router
+app.include_router(research_router(lambda: _research_root or _workspace))
 
 _frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
 if _frontend_dist.exists():
@@ -843,6 +923,12 @@ def serve_main() -> None:
         help="Workspace directory path to monitor",
     )
     parser.add_argument(
+        "--chat-config",
+        type=Path,
+        help="Optional explicit public-question chat controls; disabled when omitted",
+    )
+    parser.add_argument('--research-root',type=Path,help='Optional saved US equity study library for /research')
+    parser.add_argument(
         "--port",
         type=int,
         default=8000,
@@ -856,8 +942,10 @@ def serve_main() -> None:
     )
     args = parser.parse_args()
 
-    global _workspace
+    global _workspace, _chat_config_path, _research_root
     _workspace = os.path.abspath(args.workspace)
+    _chat_config_path = args.chat_config.resolve() if args.chat_config else None
+    _research_root = str(args.research_root.resolve()) if args.research_root else None
     manager.workspace = _workspace
 
     print(f"Workspace: {_workspace}")

@@ -33,7 +33,7 @@ class WindowsJob:
         kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
         kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         if existing:
-            self.handle = kernel.OpenJobObjectW(0x0001 | 0x0008, False, self.name)
+            self.handle = kernel.OpenJobObjectW(0x0001 | 0x0004 | 0x0008, False, self.name)
         else:
             self.handle = kernel.CreateJobObjectW(None, self.name)
         if not self.handle:
@@ -170,13 +170,36 @@ class RecoveredProcess(ManagedProcess):
     """Identity-checked process reference; never call os.kill(pid, 0) on Windows."""
 
     def __init__(self, pid: int, *, created: float | None = None,
-                 job_name: str | None = None, exit_file=None):
+                 job_name: str | None = None, exit_file=None, exit_identity=None):
         self.process = psutil.Process(pid)
         if created is not None and self.process.create_time() != created:
             raise ValueError("PID belongs to a different process")
         self.pid = pid
         self.job = WindowsJob(job_name, existing=True) if job_name else None
+        if self.job is not None:
+            kernel = self.job.kernel
+            kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+            kernel.IsProcessInJob.restype = wintypes.BOOL
+            process_handle = kernel.OpenProcess(0x1000, False, pid)
+            if not process_handle:
+                self.job.close()
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                member = wintypes.BOOL()
+                if not kernel.IsProcessInJob(process_handle, self.job.handle, ctypes.byref(member)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not member.value:
+                    raise ValueError("Recovered process does not belong to the recorded Windows job")
+            except BaseException:
+                self.job.close()
+                raise
+            finally:
+                kernel.CloseHandle(process_handle)
         self.exit_file = exit_file
+        self.exit_identity = exit_identity
+        self.unverified_exit = False
         self.returncode = None
 
     def poll(self):
@@ -187,8 +210,15 @@ class RecoveredProcess(ManagedProcess):
             except psutil.NoSuchProcess:
                 pass
             try:
-                self.returncode = int(self.exit_file.read_text())
+                if self.exit_identity is not None:
+                    from alpha_lab.local_job_state import read_exit_code
+                    self.returncode = read_exit_code(self.exit_file, *self.exit_identity)
+                    if self.returncode is None:
+                        raise ValueError("Missing invocation-scoped exit evidence")
+                else:
+                    self.returncode = int(self.exit_file.read_text())
             except (AttributeError, OSError, ValueError):
+                self.unverified_exit = True
                 self.returncode = 1  # Never report unverifiable work as successful.
         return self.returncode
 
